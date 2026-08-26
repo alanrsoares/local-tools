@@ -1,0 +1,34 @@
+# ==============================================================================
+#  local-tools — workspace manifest
+#
+#  Fast, single-purpose Rust binaries that automate this machine's day-to-day
+#  developer workflows (macOS Apple Silicon). Each tool is its own crate under
+#  `crates/` and depends on `local-common` for shared plumbing (paths, terminal
+#  helpers, …). See README.md for the vision and how to add a new tool.
+# ==============================================================================
+
+[workspace]
+resolver = "2"
+members = ["crates/local-common"]
+default-members = ["crates/local-common"]
+
+# Inherited by every crate via `version.workspace = true`, etc.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Alan R. Soares"]
+license = "MIT"
+publish = false
+repository = "https://github.com/alanrsoares/local-tools"
+
+# Dependencies shared across tools. A crate opts in with:
+#   [dependencies]
+#   clap = { workspace = true }
+[workspace.dependencies]
+
+# Workspace-wide lints, inherited by every crate that sets `[lints] workspace = true`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

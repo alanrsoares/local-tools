@@ -1,0 +1,15 @@
+[package]
+name = "local-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Shared plumbing for every tool in the workspace.
+[lib]
+name = "local_common"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

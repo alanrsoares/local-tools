@@ -1,0 +1,15 @@
+# --- Rust / Cargo ---------------------------------------------------------
+/target/
+debug/
+release/
+
+# Cargo.lock IS committed: a binary-producing workspace should lock its deps.
+
+# --- Editor / OS noise ----------------------------------------------------
+.DS_Store
+*.swp*
+*.un~
+*~
+
+# --- Local / per-user overrides (committed, but not the build) -----------
+# .local/ holds machine-specific overrides that stay out of the tree below.

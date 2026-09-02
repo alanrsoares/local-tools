@@ -30,8 +30,9 @@ fmt:
 fmt-check:
     cargo fmt --check
 
-# Full CI / QA gate (format check, lint, test)
-qa: fmt-check lint test
+# Full CI / QA gate, executed through fanout itself
+qa:
+    cargo run --quiet -p fanout -- check
 
 # ------------------------------------------------------------------------------
 # Build

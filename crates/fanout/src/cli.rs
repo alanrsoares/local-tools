@@ -10,9 +10,9 @@ USAGE:
     fanout [target] [FLAGS] [OPTIONS]
 
 TARGET:
-    check              Run root gates (lint, check:*, themes, test:unit) + workspace typechecks (default)
-    check:full         Run root gates + test:all + workspace typechecks
-    <script>           Run root <script> (if present) + all workspace packages defining <script>
+    check              Run workspace quality gates (default)
+    check:full         Run the full workspace quality gate set
+    <script>           Run a JavaScript script, or Cargo fmt-check, lint, or test
 
 FLAGS:
     --bail             Abort remaining tasks on first failure
@@ -23,7 +23,7 @@ FLAGS:
     -V, --version      Print version information
 
 OPTIONS:
-    --filter <glob>    Scope execution to workspace packages matching <glob> (e.g. "@renkonos/*", "*ui*")
+    --filter <glob>    Scope JavaScript execution to workspace packages matching <glob>
     --timeout <ms>     Timeout per task in milliseconds (default: 900000 = 15m)
     --tail <n>         Lines of output to retain on failure (default: 40, 0 = unlimited)
     -j, --jobs <n>     Concurrency ceiling (default: hardware threads, min 2)

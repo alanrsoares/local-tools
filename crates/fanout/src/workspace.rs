@@ -1,4 +1,4 @@
-//! Workspace and task discovery from package manifests.
+//! Workspace and task discovery from JavaScript and Cargo manifests.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,7 +71,7 @@ pub fn detect_runner_bin(root_dir: &Path) -> String {
     }
 }
 
-/// Locate root workspace directory containing a top-level `package.json`.
+/// Locate the nearest JavaScript or Cargo workspace root.
 pub fn find_workspace_root(start_dir: &Path) -> Result<PathBuf, String> {
     let mut curr = start_dir.to_path_buf();
     loop {
@@ -86,6 +86,11 @@ pub fn find_workspace_root(start_dir: &Path) -> Result<PathBuf, String> {
                 }
             }
         }
+
+        let cargo_path = curr.join("Cargo.toml");
+        if cargo_path.is_file() && is_cargo_workspace(&cargo_path) {
+            return Ok(curr);
+        }
         if let Some(parent) = curr.parent() {
             curr = parent.to_path_buf();
         } else {
@@ -93,15 +98,21 @@ pub fn find_workspace_root(start_dir: &Path) -> Result<PathBuf, String> {
         }
     }
 
-    // Fallback to start_dir if package.json exists there
-    if start_dir.join("package.json").is_file() {
+    // A single-package project is also a usable root for either runner.
+    if start_dir.join("package.json").is_file() || start_dir.join("Cargo.toml").is_file() {
         Ok(start_dir.to_path_buf())
     } else {
         Err(format!(
-            "could not find workspace root with package.json in '{}' or parent directories",
+            "could not find a JavaScript or Cargo workspace in '{}' or parent directories",
             start_dir.display()
         ))
     }
+}
+
+fn is_cargo_workspace(manifest_path: &Path) -> bool {
+    fs::read_to_string(manifest_path)
+        .map(|content| content.lines().any(|line| line.trim() == "[workspace]"))
+        .unwrap_or(false)
 }
 
 /// Parse workspace member packages from root `package.json`.
@@ -200,6 +211,10 @@ fn estimate_cost(task_name: &str) -> usize {
 
 /// Derive task list from options and workspace structure.
 pub fn build_tasks(opts: &Options, root_dir: &Path) -> Result<Vec<TaskSpec>, String> {
+    if root_dir.join("Cargo.toml").is_file() {
+        return build_cargo_tasks(opts, root_dir);
+    }
+
     let runner_bin = detect_runner_bin(root_dir);
     let root_pkg_file = root_dir.join("package.json");
     let root_content = fs::read_to_string(&root_pkg_file)
@@ -298,6 +313,64 @@ pub fn build_tasks(opts: &Options, root_dir: &Path) -> Result<Vec<TaskSpec>, Str
     Ok(task_specs)
 }
 
+fn build_cargo_tasks(opts: &Options, root_dir: &Path) -> Result<Vec<TaskSpec>, String> {
+    if opts.filter.is_some() {
+        return Err(
+            "--filter is not supported for Cargo workspaces; Cargo runs the workspace as one task"
+                .to_string(),
+        );
+    }
+
+    let task_defs: &[(&str, &[&str])] = match opts.target.as_str() {
+        "check" | "check:full" => &[
+            ("fmt-check", &["fmt", "--all", "--", "--check"]),
+            (
+                "lint",
+                &[
+                    "clippy",
+                    "--workspace",
+                    "--all-targets",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+            ),
+            ("test", &["test", "--workspace"]),
+        ],
+        "fmt-check" => &[("fmt-check", &["fmt", "--all", "--", "--check"])],
+        "lint" => &[(
+            "lint",
+            &[
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        )],
+        "test" => &[("test", &["test", "--workspace"])],
+        other => {
+            return Err(format!(
+                "unknown Cargo target '{other}'; use check, fmt-check, lint, or test"
+            ));
+        }
+    };
+
+    Ok(task_defs
+        .iter()
+        .enumerate()
+        .map(|(color_idx, (name, args))| TaskSpec {
+            name: (*name).to_string(),
+            runner_bin: "cargo".to_string(),
+            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            cwd: root_dir.to_path_buf(),
+            color_idx: color_idx % 7,
+            estimated_cost: estimate_cost(name),
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +384,27 @@ mod tests {
         assert!(glob_match("*ui*", "@renkonos/ui"));
         assert!(glob_match("*dashboard*", "apps/dashboard"));
         assert!(glob_match("packages/*", "packages/core"));
+    }
+
+    #[test]
+    fn cargo_workspace_builds_quality_tasks() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let tasks = build_tasks(&Options::default(), &root).unwrap();
+
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fmt-check", "lint", "test"]
+        );
+        assert!(tasks.iter().all(|task| task.runner_bin == "cargo"));
+    }
+
+    #[test]
+    fn cargo_workspace_root_is_found_from_a_member() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let member = root.join("crates/webdriver");
+        assert_eq!(find_workspace_root(&member).unwrap(), root);
     }
 }

@@ -40,3 +40,10 @@ version = "0.1.0"
 dependencies = [
  "local-common",
 ]
+
+[[package]]
+name = "webdriver"
+version = "0.1.0"
+dependencies = [
+ "local-common",
+]

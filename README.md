@@ -27,6 +27,7 @@ local-tools/
 | **`jwt`** | Zero-dependency JWT inspector, claim extractor & claim humanizer | `jwt <TOKEN>`<br>`pbpaste \| jwt`<br>`jwt -c exp,sub <TOKEN>` |
 | **`devclean`** | Multi-ecosystem build artifact scanner & disk space reclaimer | `devclean`<br>`devclean ~/dev --clean`<br>`devclean -t rust,node` |
 | **`fanout`** | Concurrent quality gate & task matrix runner with live interactive TUI | `fanout`<br>`fanout check:full --bail`<br>`fanout --filter '@renkonos/*'` |
+| **`webdriver`** | Zero-dependency browser automation, DSL runner & screenshot engine | `webdriver http://localhost:3000 wait-for '.btn' --screenshot`<br>`webdriver https://app.dev viewport 1440 900 screenshot out.png --full-page`<br>`webdriver - < script.wd` |
 
 ## Conventions
 
@@ -74,3 +75,4 @@ local-tools/
 - ✅ `jwt` — zero-dependency JWT decoder & timestamp humanizer. Test-covered.
 - ✅ `devclean` — multi-ecosystem project artifact scanner & reclaimer. Test-covered.
 - ✅ `fanout` — concurrent quality gate & task matrix runner with interactive TUI. Test-covered.
+- ✅ `webdriver` — zero-dependency browser automation, DSL runner & screenshot engine. Test-covered.

@@ -1,0 +1,23 @@
+[package]
+name = "webdriver"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Fast, zero-dependency browser automation CLI and screenshot engine.
+
+[lib]
+name = "webdriver"
+path = "src/lib.rs"
+
+[[bin]]
+name = "webdriver"
+path = "src/main.rs"
+
+[dependencies]
+local-common = { path = "../local-common" }
+
+[lints]
+workspace = true

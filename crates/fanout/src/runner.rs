@@ -837,14 +837,13 @@ fn print_verdict_summary(
             String::new()
         };
         println!(
-            "{}{} ✖ {} failed{} {}{}, {} passed{}{} in {}{}",
+            "{}{} ✖ {} failed{}{}, {} passed{} {}in {}{}",
             s.red(),
             s.bold(),
             failed.len(),
             s.reset(),
-            s.gray(),
-            passed,
             cancel_part,
+            passed,
             s.reset(),
             s.gray(),
             format_duration(elapsed),

@@ -55,6 +55,12 @@ pub enum Step {
     },
     Url,
     Title,
+    Snapshot {
+        all: bool,
+    },
+    Frame {
+        target: Option<String>,
+    },
     Console {
         mode: ConsoleMode,
     },
@@ -273,13 +279,9 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
             }
             "click" => {
                 idx += 1;
-                if idx >= tokens.len() {
-                    return Err("click requires a CSS selector argument".to_string());
-                }
-                steps.push(Step::Click {
-                    selector: tokens[idx].clone(),
-                });
-                idx += 1;
+                let selector = take_locator(tokens, &mut idx)
+                    .ok_or_else(|| "click requires a locator argument".to_string())?;
+                steps.push(Step::Click { selector });
             }
             "type" | "fill" | "input" => {
                 let clear = tok == "fill";
@@ -405,13 +407,33 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
             }
             "hover" => {
                 idx += 1;
-                if idx >= tokens.len() {
-                    return Err("'hover' requires a locator".to_string());
-                }
-                steps.push(Step::Hover {
-                    selector: tokens[idx].clone(),
-                });
+                let selector = take_locator(tokens, &mut idx)
+                    .ok_or_else(|| "'hover' requires a locator".to_string())?;
+                steps.push(Step::Hover { selector });
+            }
+            "snapshot" | "aria" => {
                 idx += 1;
+                let mut all = false;
+                if idx < tokens.len() && tokens[idx] == "--all" {
+                    all = true;
+                    idx += 1;
+                }
+                steps.push(Step::Snapshot { all });
+            }
+            "frame" => {
+                idx += 1;
+                let target = if idx < tokens.len() && !is_verb(&tokens[idx]) {
+                    let t = tokens[idx].clone();
+                    idx += 1;
+                    if t == "--top" || t == "top" {
+                        None
+                    } else {
+                        Some(t)
+                    }
+                } else {
+                    None
+                };
+                steps.push(Step::Frame { target });
             }
             "url" => {
                 idx += 1;
@@ -473,6 +495,27 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
     Ok(steps)
 }
 
+/// Consume the locator for a verb that takes exactly one, joining unquoted
+/// words up to the next verb.
+///
+/// `click text=Late Button` is what anyone would type, and a locator is the
+/// whole rest of the argument list either way — but stopping at a verb keeps
+/// `click .btn screenshot out.png` working on the command line.
+fn take_locator(tokens: &[String], idx: &mut usize) -> Option<String> {
+    let mut parts = Vec::new();
+
+    while *idx < tokens.len() && !is_verb(&tokens[*idx]) {
+        parts.push(tokens[*idx].clone());
+        *idx += 1;
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
 fn is_url(s: &str) -> bool {
     s.starts_with("http://")
         || s.starts_with("https://")
@@ -517,6 +560,9 @@ fn is_verb(s: &str) -> bool {
             | "url"
             | "title"
             | "console"
+            | "snapshot"
+            | "aria"
+            | "frame"
             | "close"
             | "quit"
             | "exit"
@@ -657,6 +703,44 @@ mod tests {
         assert_eq!(steps[6], Step::Title);
         assert_eq!(steps[7], Step::Reload { timeout_ms: 30_000 });
         assert_eq!(steps[8], Step::Close);
+    }
+
+    #[test]
+    fn click_locator_spans_words_but_stops_at_a_verb() {
+        let steps = parse_script("click text=Late Button", 30_000).expect("parse failed");
+        assert_eq!(
+            steps[0],
+            Step::Click {
+                selector: "text=Late Button".to_string()
+            }
+        );
+
+        let mixed = parse_tokens(
+            &[
+                "click".to_string(),
+                "role=button:Save".to_string(),
+                "screenshot".to_string(),
+                "out.png".to_string(),
+            ],
+            30_000,
+        )
+        .expect("parse failed");
+        assert_eq!(
+            mixed[0],
+            Step::Click {
+                selector: "role=button:Save".to_string()
+            }
+        );
+        assert_eq!(
+            mixed[1],
+            Step::Screenshot {
+                path: "out.png".to_string(),
+                full_page: false,
+                selector: None
+            }
+        );
+
+        assert!(parse_tokens(&["click".to_string()], 30_000).is_err());
     }
 
     #[test]

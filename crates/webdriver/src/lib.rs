@@ -22,6 +22,9 @@ use std::time::Instant;
 /// first paint — worth flagging rather than reporting as a clean pass.
 const NEAR_BLANK_PNG_BYTES: usize = 5_000;
 
+/// Cap on `snapshot` output, so a huge page cannot flood the transcript.
+const SNAPSHOT_NODE_LIMIT: usize = 200;
+
 /// Longest console line kept in `--errors` mode.
 const CONSOLE_LINE_LIMIT: usize = 200;
 
@@ -294,11 +297,11 @@ fn run_step(
         }
         Step::Reload { timeout_ms } => Outcome::with(session.reload(*timeout_ms)?),
         Step::Click { selector } => {
-            session.click(selector)?;
+            session.click(selector, opts.default_timeout_ms)?;
             Outcome::ok()
         }
         Step::Hover { selector } => {
-            session.hover(selector)?;
+            session.hover(selector, opts.default_timeout_ms)?;
             Outcome::ok()
         }
         Step::Press { chord } => {
@@ -310,10 +313,22 @@ fn run_step(
             text,
             clear,
         } => {
-            session.type_text(selector, text, *clear)?;
+            session.type_text(selector, text, *clear, opts.default_timeout_ms)?;
             Outcome::ok()
         }
         Step::Eval { expr } => Outcome::with(session.evaluate(expr)?.to_json_string()),
+        Step::Snapshot { all } => {
+            let nodes = session.snapshot(*all, SNAPSHOT_NODE_LIMIT)?;
+            for node in &nodes {
+                let _ = writeln!(out, "{} {} \"{}\"", node.reference, node.role, node.name);
+            }
+            Outcome::with(format!(
+                "{} node{}",
+                nodes.len(),
+                if nodes.len() == 1 { "" } else { "s" }
+            ))
+        }
+        Step::Frame { target } => Outcome::with(session.target_frame(target.as_deref())?),
         Step::Url => Outcome::with(session.current_url()?),
         Step::Title => Outcome::with(session.title()?),
         Step::Console { mode } => {
@@ -412,6 +427,8 @@ fn verb_of(step: &Step) -> &'static str {
         Step::Type { clear: true, .. } => "fill",
         Step::Type { .. } => "type",
         Step::Eval { .. } => "eval",
+        Step::Snapshot { .. } => "snapshot",
+        Step::Frame { .. } => "frame",
         Step::Url => "url",
         Step::Title => "title",
         Step::Console { .. } => "console",

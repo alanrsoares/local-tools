@@ -213,10 +213,32 @@ impl ConsoleEntry {
     }
 }
 
+/// A JS execution context, one per frame. Tracked so commands can be aimed at
+/// an iframe instead of always hitting the top frame.
+#[derive(Debug, Clone)]
+struct ExecutionContext {
+    id: i64,
+    frame_id: String,
+}
+
+/// One interactive node from the accessibility tree, addressable as `ref=eN`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotNode {
+    pub reference: String,
+    pub role: String,
+    pub name: String,
+    pub backend_node_id: i64,
+}
+
 pub struct CdpSession {
     ws: WebSocketClient,
     next_id: u64,
     console: Vec<ConsoleEntry>,
+    contexts: Vec<ExecutionContext>,
+    /// Frame the next command targets; `None` means the top frame.
+    target_frame: Option<String>,
+    /// Last `snapshot` result, keyed by the `eN` reference handed to the agent.
+    refs: HashMap<String, i64>,
 }
 
 impl CdpSession {
@@ -225,6 +247,9 @@ impl CdpSession {
             ws,
             next_id: 1,
             console: Vec::new(),
+            contexts: Vec::new(),
+            target_frame: None,
+            refs: HashMap::new(),
         }
     }
 
@@ -250,6 +275,34 @@ impl CdpSession {
             return;
         };
         let params = val.get("params");
+
+        match method {
+            "Runtime.executionContextCreated" => {
+                let ctx = params.and_then(|p| p.get("context"));
+                let id = ctx.and_then(|c| c.get("id")).and_then(|i| i.as_i64());
+                let frame_id = ctx
+                    .and_then(|c| c.get("auxData"))
+                    .and_then(|a| a.get("frameId"))
+                    .and_then(|f| f.as_str());
+                if let (Some(id), Some(frame_id)) = (id, frame_id) {
+                    self.contexts.retain(|c| c.id != id);
+                    self.contexts.push(ExecutionContext {
+                        id,
+                        frame_id: frame_id.to_string(),
+                    });
+                }
+            }
+            "Runtime.executionContextDestroyed" => {
+                if let Some(id) = params
+                    .and_then(|p| p.get("executionContextId"))
+                    .and_then(|i| i.as_i64())
+                {
+                    self.contexts.retain(|c| c.id != id);
+                }
+            }
+            "Runtime.executionContextsCleared" => self.contexts.clear(),
+            _ => {}
+        }
 
         let entry = match method {
             "Runtime.consoleAPICalled" => {
@@ -361,6 +414,7 @@ impl CdpSession {
         self.call("DOM.enable", JsonValue::Object(HashMap::new()))?;
         // Log domain surfaces network/security failures the page never logs itself.
         let _ = self.call("Log.enable", JsonValue::Object(HashMap::new()));
+        let _ = self.call("Accessibility.enable", JsonValue::Object(HashMap::new()));
         Ok(())
     }
 
@@ -406,57 +460,226 @@ impl CdpSession {
     }
 
     pub fn evaluate(&mut self, expression: &str) -> Result<JsonValue, String> {
+        let resp = self.raw_evaluate(expression, true)?;
+        Ok(resp
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .cloned()
+            .unwrap_or(JsonValue::Null))
+    }
+
+    /// Evaluate and keep the result as a live JS handle, so actions operate on
+    /// the element itself rather than re-running a selector for every step.
+    fn evaluate_handle(&mut self, expression: &str) -> Result<Option<String>, String> {
+        let resp = self.raw_evaluate(expression, false)?;
+        Ok(resp
+            .get("result")
+            .and_then(|r| r.get("objectId"))
+            .and_then(|o| o.as_str())
+            .map(|s| s.to_string()))
+    }
+
+    fn raw_evaluate(&mut self, expression: &str, by_value: bool) -> Result<JsonValue, String> {
         let mut params = HashMap::new();
         params.insert(
             "expression".to_string(),
             JsonValue::String(expression.to_string()),
         );
+        params.insert("returnByValue".to_string(), JsonValue::Bool(by_value));
+        params.insert("awaitPromise".to_string(), JsonValue::Bool(true));
+
+        if let Some(context_id) = self.target_context_id()? {
+            params.insert(
+                "contextId".to_string(),
+                JsonValue::Number(context_id as f64),
+            );
+        }
+
+        let resp = self.call("Runtime.evaluate", JsonValue::Object(params))?;
+        throw_if_exception(&resp)?;
+        Ok(resp)
+    }
+
+    /// Call `function_declaration` with the element handle as `this`.
+    fn call_on(
+        &mut self,
+        object_id: &str,
+        function_declaration: &str,
+    ) -> Result<JsonValue, String> {
+        let mut params = HashMap::new();
+        params.insert(
+            "objectId".to_string(),
+            JsonValue::String(object_id.to_string()),
+        );
+        params.insert(
+            "functionDeclaration".to_string(),
+            JsonValue::String(function_declaration.to_string()),
+        );
         params.insert("returnByValue".to_string(), JsonValue::Bool(true));
         params.insert("awaitPromise".to_string(), JsonValue::Bool(true));
 
-        let resp = self.call("Runtime.evaluate", JsonValue::Object(params))?;
+        let resp = self.call("Runtime.callFunctionOn", JsonValue::Object(params))?;
+        throw_if_exception(&resp)?;
+        Ok(resp
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .cloned()
+            .unwrap_or(JsonValue::Null))
+    }
 
-        if let Some(ex) = resp.get("exceptionDetails") {
-            let desc = ex
-                .get("text")
-                .and_then(|t| t.as_str())
-                .unwrap_or("JS evaluation threw an exception");
-            return Err(format!("JS error: {desc}"));
-        }
+    fn release(&mut self, object_id: &str) {
+        let mut params = HashMap::new();
+        params.insert(
+            "objectId".to_string(),
+            JsonValue::String(object_id.to_string()),
+        );
+        let _ = self.call("Runtime.releaseObject", JsonValue::Object(params));
+    }
 
-        if let Some(res) = resp.get("result") {
-            if let Some(val) = res.get("value") {
-                return Ok(val.clone());
+    fn target_context_id(&mut self) -> Result<Option<i64>, String> {
+        let Some(frame_id) = self.target_frame.clone() else {
+            return Ok(None);
+        };
+
+        self.contexts
+            .iter()
+            .find(|c| c.frame_id == frame_id)
+            .map(|c| Some(c.id))
+            .ok_or_else(|| {
+                "the targeted frame has no live execution context (it may have navigated away)"
+                    .to_string()
+            })
+    }
+
+    /// Resolve a locator to a live element handle, retrying until it is present
+    /// and visible or `timeout_ms` runs out.
+    ///
+    /// Without this an action fails the instant it runs a step early, which is
+    /// the common case on any app that renders asynchronously — the caller
+    /// would otherwise have to hand-write a `wait-for` before every click.
+    fn resolve(&mut self, spec: &str, timeout_ms: u64) -> Result<String, String> {
+        let start = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms);
+
+        loop {
+            let reason;
+            let candidate = match spec.strip_prefix("ref=") {
+                Some(reference) => self.resolve_reference(reference),
+                None => self.evaluate_handle(&locator::with_prelude(&format!(
+                    "window.__wd.find(\"{}\")",
+                    json::escape_str(spec)
+                ))),
+            };
+
+            match candidate {
+                Ok(Some(object_id)) => {
+                    let visible = self.call_on(
+                        &object_id,
+                        "function() { return window.__wd ? window.__wd.visible(this) : !!this.getClientRects().length; }",
+                    );
+                    match visible {
+                        Ok(JsonValue::Bool(true)) => return Ok(object_id),
+                        _ => {
+                            self.release(&object_id);
+                            reason = format!("'{spec}' matched but is not visible");
+                        }
+                    }
+                }
+                Ok(None) => reason = format!("no element matched '{spec}'"),
+                Err(e) => reason = e,
             }
-        }
 
-        Ok(JsonValue::Null)
+            if start.elapsed() >= timeout {
+                return Err(format!("{reason} after {timeout_ms}ms"));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn resolve_reference(&mut self, reference: &str) -> Result<Option<String>, String> {
+        let backend_node_id = *self.refs.get(reference).ok_or_else(|| {
+            format!("unknown reference '{reference}' — run `snapshot` to refresh references")
+        })?;
+
+        let mut params = HashMap::new();
+        params.insert(
+            "backendNodeId".to_string(),
+            JsonValue::Number(backend_node_id as f64),
+        );
+
+        let resp = self
+            .call("DOM.resolveNode", JsonValue::Object(params))
+            .map_err(|_| {
+                format!("reference '{reference}' is stale — run `snapshot` to refresh references")
+            })?;
+
+        Ok(resp
+            .get("object")
+            .and_then(|o| o.get("objectId"))
+            .and_then(|o| o.as_str())
+            .map(|s| s.to_string()))
+    }
+
+    /// Scroll into view and return the element's centre in *main frame*
+    /// coordinates.
+    ///
+    /// `Input.dispatchMouseEvent` is always main-frame relative, while
+    /// `getBoundingClientRect()` is relative to the element's own frame — so
+    /// inside an iframe the two disagree by the iframe's offset and clicks land
+    /// somewhere else entirely. `DOM.getContentQuads` reports in the space the
+    /// input events actually use.
+    fn centre_of(&mut self, object_id: &str) -> Result<(f64, f64), String> {
+        self.call_on(
+            object_id,
+            r#"function() { this.scrollIntoView({ block: "center", inline: "center" }); }"#,
+        )?;
+
+        let mut params = HashMap::new();
+        params.insert(
+            "objectId".to_string(),
+            JsonValue::String(object_id.to_string()),
+        );
+        let resp = self.call("DOM.getContentQuads", JsonValue::Object(params))?;
+
+        let quad = resp
+            .get("quads")
+            .and_then(|q| q.as_array())
+            .and_then(|quads| quads.first())
+            .and_then(|q| q.as_array())
+            .filter(|points| points.len() >= 8)
+            .ok_or_else(|| "element has no layout box to click".to_string())?;
+
+        let coordinate = |i: usize| quad[i].as_f64().unwrap_or(0.0);
+        let x = (coordinate(0) + coordinate(2) + coordinate(4) + coordinate(6)) / 4.0;
+        let y = (coordinate(1) + coordinate(3) + coordinate(5) + coordinate(7)) / 4.0;
+
+        Ok((x, y))
+    }
+
+    fn mouse_event(&mut self, kind: &str, x: f64, y: f64, clicks: f64) -> Result<(), String> {
+        let mut params = HashMap::new();
+        params.insert("type".to_string(), JsonValue::String(kind.to_string()));
+        params.insert("x".to_string(), JsonValue::Number(x));
+        params.insert("y".to_string(), JsonValue::Number(y));
+        if clicks > 0.0 {
+            params.insert("button".to_string(), JsonValue::String("left".to_string()));
+            params.insert("clickCount".to_string(), JsonValue::Number(clicks));
+            params.insert("buttons".to_string(), JsonValue::Number(1.0));
+        }
+        self.call("Input.dispatchMouseEvent", JsonValue::Object(params))?;
+        Ok(())
     }
 
     /// Wait until `spec` resolves to an element that is visible *and* painted.
     /// Two animation frames after the layout box appears rule out an `ok` that
     /// really means "matched unpainted SSR markup".
     pub fn wait_for(&mut self, spec: &str, timeout_ms: u64) -> Result<(), String> {
-        let start = Instant::now();
-        let timeout = Duration::from_millis(timeout_ms);
-        let check_expr = locator::with_prelude(&format!(
-            "(() => {{ const el = window.__wd.find(\"{}\"); return !!el && window.__wd.visible(el); }})()",
-            json::escape_str(spec)
-        ));
-
-        while start.elapsed() < timeout {
-            if let Ok(JsonValue::Bool(true)) = self.evaluate(&check_expr) {
-                self.evaluate(
-                    "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))",
-                )?;
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        Err(format!(
-            "timed out waiting for '{spec}' after {timeout_ms}ms"
-        ))
+        let object_id = self.resolve(spec, timeout_ms)?;
+        self.release(&object_id);
+        self.evaluate(
+            "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))",
+        )?;
+        Ok(())
     }
 
     /// Wait until the current URL contains `substring`.
@@ -530,33 +753,6 @@ impl CdpSession {
             .to_string())
     }
 
-    /// Move the real mouse over the element so CSS `:hover` actually applies —
-    /// JS-dispatched mouse events do not trigger it.
-    pub fn hover(&mut self, spec: &str) -> Result<(), String> {
-        let center = self.evaluate(&locator::with_prelude(&format!(
-            r#"(() => {{
-                const el = window.__wd.require("{}");
-                el.scrollIntoView({{ block: "center", inline: "center" }});
-                const r = el.getBoundingClientRect();
-                return {{ x: r.left + r.width / 2, y: r.top + r.height / 2 }};
-            }})()"#,
-            json::escape_str(spec)
-        )))?;
-
-        let x = center.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let y = center.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-
-        let mut params = HashMap::new();
-        params.insert(
-            "type".to_string(),
-            JsonValue::String("mouseMoved".to_string()),
-        );
-        params.insert("x".to_string(), JsonValue::Number(x));
-        params.insert("y".to_string(), JsonValue::Number(y));
-        self.call("Input.dispatchMouseEvent", JsonValue::Object(params))?;
-        Ok(())
-    }
-
     /// Send a key chord such as `Enter`, `Escape` or `Meta+O` to the focused element.
     pub fn press(&mut self, chord: &str) -> Result<(), String> {
         let mut modifiers = 0f64;
@@ -593,46 +789,82 @@ impl CdpSession {
         Ok(())
     }
 
-    pub fn click(&mut self, spec: &str) -> Result<(), String> {
-        let script = locator::with_prelude(&format!(
-            r#"(() => {{
-                const el = window.__wd.require("{}");
-                el.scrollIntoView({{ block: "center", inline: "center" }});
-                el.click();
-                return true;
-            }})()"#,
-            json::escape_str(spec)
-        ));
-
-        self.evaluate(&script)?;
-        Ok(())
+    /// Click via real mouse input, so `event.isTrusted` holds and libraries
+    /// that listen for pointer events behave as they do for a person.
+    pub fn click(&mut self, spec: &str, timeout_ms: u64) -> Result<(), String> {
+        let object_id = self.resolve(spec, timeout_ms)?;
+        let result = (|| -> Result<(), String> {
+            let (x, y) = self.centre_of(&object_id)?;
+            self.mouse_event("mouseMoved", x, y, 0.0)?;
+            self.mouse_event("mousePressed", x, y, 1.0)?;
+            self.mouse_event("mouseReleased", x, y, 1.0)
+        })();
+        self.release(&object_id);
+        result
     }
 
-    /// Set a form field's value. Writes through the *native* value setter so a
-    /// React controlled input actually fires `onChange` — assigning `el.value`
-    /// directly is swallowed by React's value tracker.
-    pub fn type_text(&mut self, spec: &str, text: &str, clear: bool) -> Result<(), String> {
-        let script = locator::with_prelude(&format!(
-            r#"(() => {{
-                const el = window.__wd.require("{}");
-                el.focus();
-                const next = ({} ? "" : (el.value || "")) + "{}";
-                const proto = el instanceof HTMLTextAreaElement
-                    ? HTMLTextAreaElement.prototype
-                    : HTMLInputElement.prototype;
-                const setter = Object.getOwnPropertyDescriptor(proto, "value");
-                if (setter && setter.set) {{ setter.set.call(el, next); }} else {{ el.value = next; }}
-                el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-                el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-                return true;
-            }})()"#,
-            json::escape_str(spec),
-            if clear { "true" } else { "false" },
-            json::escape_str(text)
-        ));
+    pub fn hover(&mut self, spec: &str, timeout_ms: u64) -> Result<(), String> {
+        let object_id = self.resolve(spec, timeout_ms)?;
+        let result = (|| -> Result<(), String> {
+            let (x, y) = self.centre_of(&object_id)?;
+            self.mouse_event("mouseMoved", x, y, 0.0)
+        })();
+        self.release(&object_id);
+        result
+    }
 
-        self.evaluate(&script)?;
-        Ok(())
+    /// Set a form field's value using real editing input.
+    ///
+    /// `Input.insertText` goes through the browser's own text pipeline, so a
+    /// React controlled input sees the same events it would from a person —
+    /// assigning `el.value` is swallowed by React's value tracker.
+    pub fn type_text(
+        &mut self,
+        spec: &str,
+        text: &str,
+        clear: bool,
+        timeout_ms: u64,
+    ) -> Result<(), String> {
+        let object_id = self.resolve(spec, timeout_ms)?;
+
+        let result = (|| -> Result<(), String> {
+            let (x, y) = self.centre_of(&object_id)?;
+            self.mouse_event("mouseMoved", x, y, 0.0)?;
+            self.mouse_event("mousePressed", x, y, 1.0)?;
+            self.mouse_event("mouseReleased", x, y, 1.0)?;
+
+            self.call_on(
+                &object_id,
+                if clear {
+                    r#"function() {
+                        this.focus();
+                        if (typeof this.select === "function") { this.select(); }
+                        else if (this.isContentEditable) { document.execCommand("selectAll"); }
+                    }"#
+                } else {
+                    r#"function() {
+                        this.focus();
+                        const end = (this.value || "").length;
+                        if (typeof this.setSelectionRange === "function") {
+                            try { this.setSelectionRange(end, end); } catch (_) {}
+                        }
+                    }"#
+                },
+            )?;
+
+            if clear && text.is_empty() {
+                self.press("Backspace")?;
+                return Ok(());
+            }
+
+            let mut params = HashMap::new();
+            params.insert("text".to_string(), JsonValue::String(text.to_string()));
+            self.call("Input.insertText", JsonValue::Object(params))?;
+            Ok(())
+        })();
+
+        self.release(&object_id);
+        result
     }
 
     pub fn capture_screenshot(
@@ -644,17 +876,18 @@ impl CdpSession {
         params.insert("format".to_string(), JsonValue::String("png".to_string()));
 
         if let Some(sel) = selector {
-            let clip_script = locator::with_prelude(&format!(
-                r#"(() => {{
-                    const el = window.__wd.require("{}");
-                    el.scrollIntoView({{ block: "center", inline: "center" }});
-                    const r = el.getBoundingClientRect();
-                    return {{ x: r.left, y: r.top, width: r.width, height: r.height }};
-                }})()"#,
-                json::escape_str(sel)
-            ));
+            let object_id = self.resolve(sel, 5_000)?;
+            let clip_val = self.call_on(
+                &object_id,
+                r#"function() {
+                    this.scrollIntoView({ block: "center", inline: "center" });
+                    const r = this.getBoundingClientRect();
+                    return { x: r.left, y: r.top, width: r.width, height: r.height };
+                }"#,
+            );
+            self.release(&object_id);
+            let clip_val = clip_val?;
 
-            let clip_val = self.evaluate(&clip_script)?;
             let x = clip_val.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let y = clip_val.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let w = clip_val
@@ -705,6 +938,113 @@ impl CdpSession {
         val.as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| "failed to retrieve HTML string".to_string())
+    }
+
+    /// Snapshot the accessibility tree as `eN role "name"` lines.
+    ///
+    /// This is what lets an agent act without inventing selectors: every line
+    /// carries a `ref=eN` handle that `click`/`fill`/`hover` accept, resolved
+    /// through the DOM node the a11y tree points at. Chrome computes the names,
+    /// so `aria-labelledby` and `<label for>` are honoured properly.
+    pub fn snapshot(&mut self, all: bool, limit: usize) -> Result<Vec<SnapshotNode>, String> {
+        let mut params = HashMap::new();
+        // Scope the tree to the targeted frame, otherwise `frame` selects an
+        // iframe and `snapshot` keeps describing the page around it.
+        if let Some(ref frame_id) = self.target_frame {
+            params.insert("frameId".to_string(), JsonValue::String(frame_id.clone()));
+        }
+        let resp = self.call("Accessibility.getFullAXTree", JsonValue::Object(params))?;
+        let nodes: Vec<JsonValue> = resp
+            .get("nodes")
+            .and_then(|n| n.as_array())
+            .map(<[JsonValue]>::to_vec)
+            .unwrap_or_default();
+
+        self.refs.clear();
+        let mut out = Vec::new();
+
+        for node in nodes {
+            if node.get("ignored").and_then(|i| i.as_bool()) == Some(true) {
+                continue;
+            }
+            let Some(backend_node_id) = node.get("backendDOMNodeId").and_then(|b| b.as_i64())
+            else {
+                continue;
+            };
+            let role = node
+                .get("role")
+                .and_then(|r| r.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = node
+                .get("name")
+                .and_then(|n| n.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if !all && !is_interesting_role(&role) {
+                continue;
+            }
+            if role.is_empty() || (name.is_empty() && !all) {
+                continue;
+            }
+
+            let reference = format!("e{}", out.len() + 1);
+            self.refs.insert(reference.clone(), backend_node_id);
+            out.push(SnapshotNode {
+                reference,
+                role,
+                name,
+                backend_node_id,
+            });
+
+            if out.len() >= limit {
+                break;
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// Aim subsequent commands at a frame whose URL or name contains
+    /// `substring`. Without this everything runs against the top frame, which
+    /// makes an OAuth or payment iframe invisible to the driver.
+    pub fn target_frame(&mut self, substring: Option<&str>) -> Result<String, String> {
+        let Some(substring) = substring else {
+            self.target_frame = None;
+            return Ok("top".to_string());
+        };
+
+        let frames = self.frame_tree()?;
+        let hit = frames
+            .iter()
+            .find(|(_, url, name)| url.contains(substring) || name.contains(substring))
+            .ok_or_else(|| {
+                let known: Vec<String> = frames
+                    .iter()
+                    .map(|(_, url, _)| truncate_middle(url, 60))
+                    .collect();
+                format!(
+                    "no frame matching '{substring}' (frames: {})",
+                    known.join(", ")
+                )
+            })?;
+
+        self.target_frame = Some(hit.0.clone());
+        // Surface the missing context now rather than on the next command.
+        self.target_context_id()?;
+        Ok(truncate_middle(&hit.1, 80))
+    }
+
+    fn frame_tree(&mut self) -> Result<Vec<(String, String, String)>, String> {
+        let resp = self.call("Page.getFrameTree", JsonValue::Object(HashMap::new()))?;
+        let mut out = Vec::new();
+        if let Some(tree) = resp.get("frameTree") {
+            collect_frames(tree, &mut out);
+        }
+        Ok(out)
     }
 
     pub fn close_browser(&mut self) -> Result<(), String> {
@@ -778,4 +1118,88 @@ fn key_descriptor(name: &str) -> Result<(String, String, f64, Option<String>), S
         }
         _ => Err(format!("unknown key '{name}'")),
     }
+}
+
+fn throw_if_exception(resp: &JsonValue) -> Result<(), String> {
+    if let Some(ex) = resp.get("exceptionDetails") {
+        let desc = ex
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| ex.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("JS evaluation threw an exception");
+        return Err(format!("JS error: {desc}"));
+    }
+    Ok(())
+}
+
+/// Roles worth listing by default: the things an agent can act on, plus the
+/// landmarks it needs to know where it is.
+fn is_interesting_role(role: &str) -> bool {
+    matches!(
+        role,
+        "button"
+            | "link"
+            | "textbox"
+            | "searchbox"
+            | "checkbox"
+            | "radio"
+            | "combobox"
+            | "listbox"
+            | "option"
+            | "menuitem"
+            | "menuitemcheckbox"
+            | "menuitemradio"
+            | "tab"
+            | "switch"
+            | "slider"
+            | "spinbutton"
+            | "heading"
+            | "dialog"
+            | "alert"
+            | "alertdialog"
+            | "status"
+            | "img"
+    )
+}
+
+fn collect_frames(tree: &JsonValue, out: &mut Vec<(String, String, String)>) {
+    if let Some(frame) = tree.get("frame") {
+        let id = frame
+            .get("id")
+            .and_then(|i| i.as_str())
+            .unwrap_or("")
+            .to_string();
+        let url = frame
+            .get("url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string();
+        let name = frame
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !id.is_empty() {
+            out.push((id, url, name));
+        }
+    }
+
+    if let Some(children) = tree.get("childFrames").and_then(|c| c.as_array()) {
+        for child in children {
+            collect_frames(child, out);
+        }
+    }
+}
+
+fn truncate_middle(s: &str, limit: usize) -> String {
+    if s.chars().count() <= limit {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(limit / 2).collect();
+    let tail: String = s
+        .chars()
+        .skip(s.chars().count().saturating_sub(limit / 2))
+        .collect();
+    format!("{head}…{tail}")
 }

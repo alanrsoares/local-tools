@@ -191,6 +191,11 @@ pub fn print_help() {
     \x1b[1;33mtext=\x1b[0mSome label          Innermost element containing the text
     \x1b[1;33mrole=\x1b[0mbutton:Save         ARIA role + accessible name
     \x1b[1;33msel=\x1b[0m<css> or bare CSS    CSS selector
+    \x1b[1;33mref=\x1b[0me7                    Handle from the last snapshot (names come from Chrome)
+
+    Actions retry until the element is present and visible, up to --timeout, so a
+    wait-for before every click is unnecessary. Clicks and typing go through real
+    browser input events.
 
 \x1b[1mVERBS & ACTIONS:\x1b[0m
     \x1b[1;33mgoto\x1b[0m <url>                     Navigate to URL (default for initial URL)
@@ -208,6 +213,8 @@ pub fn print_help() {
     \x1b[1;33meval\x1b[0m <js_expr>                 Evaluate JS, prints JSON result
     \x1b[1;33murl\x1b[0m / \x1b[1;33mtitle\x1b[0m                   Print current URL / page title
     \x1b[1;33mconsole\x1b[0m [--errors|--full|--clear]  Buffered console errors, repeats collapsed
+    \x1b[1;33msnapshot\x1b[0m [--all]                 Accessibility tree as 'eN role \"name\"' lines
+    \x1b[1;33mframe\x1b[0m <substr> | --top           Aim later commands at an iframe (URL or name)
     \x1b[1;33mscreenshot\x1b[0m [path] [flags]      Capture PNG (flags: --full-page, --selector <loc>)
     \x1b[1;33mpdf\x1b[0m [path]                     Print page to PDF
     \x1b[1;33mhtml\x1b[0m [path]                    Dump current HTML to file or stdout

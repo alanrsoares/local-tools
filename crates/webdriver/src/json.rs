@@ -179,7 +179,36 @@ impl<'a> Parser<'a> {
                                 return Err("truncated unicode escape".to_string());
                             }
                         }
-                        if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                        if let Ok(mut code) = u32::from_str_radix(&hex, 16) {
+                            // A non-BMP character arrives as a surrogate pair of
+                            // escapes. Neither half is a valid `char` on its
+                            // own, so the low half is folded in here rather
+                            // than silently dropping both.
+                            if (0xD800..0xDC00).contains(&code) {
+                                let mut low = String::new();
+                                if self.chars.peek() == Some(&'\\') {
+                                    self.chars.next();
+                                    if self.chars.peek() == Some(&'u') {
+                                        self.chars.next();
+                                        for _ in 0..4 {
+                                            match self.chars.next() {
+                                                Some(h) => low.push(h),
+                                                None => {
+                                                    return Err(
+                                                        "truncated unicode escape".to_string()
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Ok(low) = u32::from_str_radix(&low, 16) {
+                                    if (0xDC00..0xE000).contains(&low) {
+                                        code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                                    }
+                                }
+                            }
+
                             if let Some(ch) = char::from_u32(code) {
                                 s.push(ch);
                             }
@@ -320,6 +349,16 @@ pub fn parse(input: &str) -> Result<JsonValue, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_surrogate_pairs() {
+        let val = parse(r#"{"emoji":"\uD83D\uDCBE ok","bmp":"\u00e9"}"#).expect("parse failed");
+        assert_eq!(
+            val.get("emoji").and_then(|v| v.as_str()),
+            Some("\u{1F4BE} ok")
+        );
+        assert_eq!(val.get("bmp").and_then(|v| v.as_str()), Some("\u{e9}"));
+    }
 
     #[test]
     fn parse_complex_json() {

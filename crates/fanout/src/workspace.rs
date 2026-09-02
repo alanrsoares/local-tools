@@ -1,16 +1,20 @@
-//! Workspace and task discovery from JavaScript and Cargo manifests.
+//! Workspace and task discovery from JavaScript, Turbo, and Cargo manifests.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cli::Options;
+use crate::dag::{PipelineRule, TurboPipeline};
 use crate::json;
+use crate::scm;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspacePkg {
     pub name: String,
     pub dir: PathBuf,
     pub scripts: Vec<String>,
+    pub internal_deps: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +81,6 @@ pub fn find_workspace_root(start_dir: &Path) -> Result<PathBuf, String> {
     loop {
         let pkg_path = curr.join("package.json");
         if pkg_path.is_file() {
-            // Check if it has workspaces or if parent has none
             if let Ok(content) = fs::read_to_string(&pkg_path) {
                 if let Ok(val) = json::parse(&content) {
                     if val.get("workspaces").is_some() {
@@ -98,7 +101,6 @@ pub fn find_workspace_root(start_dir: &Path) -> Result<PathBuf, String> {
         }
     }
 
-    // A single-package project is also a usable root for either runner.
     if start_dir.join("package.json").is_file() || start_dir.join("Cargo.toml").is_file() {
         Ok(start_dir.to_path_buf())
     } else {
@@ -115,7 +117,7 @@ fn is_cargo_workspace(manifest_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Parse workspace member packages from root `package.json`.
+/// Parse workspace member packages and wire internal dependencies from root `package.json`.
 pub fn discover_workspace_packages(root_dir: &Path) -> Result<Vec<WorkspacePkg>, String> {
     let root_pkg_file = root_dir.join("package.json");
     let content = fs::read_to_string(&root_pkg_file)
@@ -142,17 +144,32 @@ pub fn discover_workspace_packages(root_dir: &Path) -> Result<Vec<WorkspacePkg>,
         }
     }
 
-    let mut pkgs = Vec::new();
+    let mut raw_pkgs = Vec::new();
     for pattern in patterns {
-        scan_workspace_pattern(root_dir, &pattern, &mut pkgs);
+        scan_workspace_pattern(root_dir, &pattern, &mut raw_pkgs);
     }
 
-    // Sort by name for stable ordering
+    let pkg_names: HashSet<String> = raw_pkgs.iter().map(|(pkg, _)| pkg.name.clone()).collect();
+
+    let mut pkgs = Vec::new();
+    for (mut pkg, raw_declared_deps) in raw_pkgs {
+        for dep in raw_declared_deps {
+            if pkg_names.contains(&dep) {
+                pkg.internal_deps.push(dep);
+            }
+        }
+        pkgs.push(pkg);
+    }
+
     pkgs.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(pkgs)
 }
 
-fn scan_workspace_pattern(root_dir: &Path, pattern: &str, out: &mut Vec<WorkspacePkg>) {
+fn scan_workspace_pattern(
+    root_dir: &Path,
+    pattern: &str,
+    out: &mut Vec<(WorkspacePkg, Vec<String>)>,
+) {
     let clean = pattern.trim_end_matches('/');
     if let Some(prefix) = clean.strip_suffix("/*") {
         let parent_dir = root_dir.join(prefix);
@@ -162,8 +179,8 @@ fn scan_workspace_pattern(root_dir: &Path, pattern: &str, out: &mut Vec<Workspac
                 if path.is_dir() {
                     let manifest = path.join("package.json");
                     if manifest.is_file() {
-                        if let Some(pkg) = read_pkg(&manifest, &path) {
-                            out.push(pkg);
+                        if let Some(res) = read_pkg(&manifest, &path) {
+                            out.push(res);
                         }
                     }
                 }
@@ -173,28 +190,79 @@ fn scan_workspace_pattern(root_dir: &Path, pattern: &str, out: &mut Vec<Workspac
         let direct = root_dir.join(clean);
         let manifest = direct.join("package.json");
         if manifest.is_file() {
-            if let Some(pkg) = read_pkg(&manifest, &direct) {
-                out.push(pkg);
+            if let Some(res) = read_pkg(&manifest, &direct) {
+                out.push(res);
             }
         }
     }
 }
 
-fn read_pkg(manifest_path: &Path, dir: &Path) -> Option<WorkspacePkg> {
+fn read_pkg(manifest_path: &Path, dir: &Path) -> Option<(WorkspacePkg, Vec<String>)> {
     let content = fs::read_to_string(manifest_path).ok()?;
     let val = json::parse(&content).ok()?;
     let name = val.get("name")?.as_str()?.to_string();
+
     let mut scripts = Vec::new();
     if let Some(s_obj) = val.get("scripts").and_then(|s| s.as_object()) {
         for k in s_obj.keys() {
             scripts.push(k.clone());
         }
     }
-    Some(WorkspacePkg {
-        name,
-        dir: dir.to_path_buf(),
-        scripts,
-    })
+
+    let mut raw_deps = Vec::new();
+    for section in &[
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ] {
+        if let Some(dep_obj) = val.get(section).and_then(|d| d.as_object()) {
+            for k in dep_obj.keys() {
+                raw_deps.push(k.clone());
+            }
+        }
+    }
+
+    Some((
+        WorkspacePkg {
+            name,
+            dir: dir.to_path_buf(),
+            scripts,
+            internal_deps: Vec::new(),
+        },
+        raw_deps,
+    ))
+}
+
+/// Read `turbo.json` task pipeline rules if present in the workspace root.
+pub fn read_turbo_pipeline(root_dir: &Path) -> Option<TurboPipeline> {
+    let turbo_file = root_dir.join("turbo.json");
+    if !turbo_file.is_file() {
+        return None;
+    }
+
+    let content = fs::read_to_string(&turbo_file).ok()?;
+    let val = json::parse(&content).ok()?;
+
+    let tasks_obj = val
+        .get("tasks")
+        .or_else(|| val.get("pipeline"))
+        .and_then(|t| t.as_object())?;
+
+    let mut rules = HashMap::new();
+    for (task_name, task_val) in tasks_obj {
+        let mut depends_on = Vec::new();
+        if let Some(arr) = task_val.get("dependsOn").and_then(|d| d.as_array()) {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    depends_on.push(s.to_string());
+                }
+            }
+        }
+        rules.insert(task_name.clone(), PipelineRule { depends_on });
+    }
+
+    Some(TurboPipeline { task_rules: rules })
 }
 
 fn estimate_cost(task_name: &str) -> usize {
@@ -209,10 +277,14 @@ fn estimate_cost(task_name: &str) -> usize {
     }
 }
 
-/// Derive task list from options and workspace structure.
-pub fn build_tasks(opts: &Options, root_dir: &Path) -> Result<Vec<TaskSpec>, String> {
-    if root_dir.join("Cargo.toml").is_file() {
-        return build_cargo_tasks(opts, root_dir);
+/// Derive task list from options, workspace structure, and Git affected scope.
+pub fn build_tasks(
+    opts: &Options,
+    root_dir: &Path,
+) -> Result<(Vec<TaskSpec>, Vec<WorkspacePkg>), String> {
+    if root_dir.join("Cargo.toml").is_file() && !root_dir.join("package.json").is_file() {
+        let tasks = build_cargo_tasks(opts, root_dir)?;
+        return Ok((tasks, Vec::new()));
     }
 
     let runner_bin = detect_runner_bin(root_dir);
@@ -228,81 +300,115 @@ pub fn build_tasks(opts: &Options, root_dir: &Path) -> Result<Vec<TaskSpec>, Str
         .map(|m| m.keys().cloned().collect())
         .unwrap_or_default();
 
-    let is_check = opts.target == "check" || opts.target == "check:full";
-    let script_for_pkgs = if is_check { "typecheck" } else { &opts.target };
+    let pkgs = discover_workspace_packages(root_dir)?;
+
+    // Resolve affected packages if --since is given
+    let affected_names: Option<HashSet<String>> = if let Some(ref since_ref) = opts.since {
+        let changed_files = scm::find_changed_files(root_dir, since_ref)?;
+        let affected = scm::resolve_affected_packages(&pkgs, &changed_files, root_dir, true);
+        Some(affected.into_iter().collect())
+    } else {
+        None
+    };
 
     let mut task_specs = Vec::new();
 
-    // 1. Root gates (only when no filter is applied)
-    if opts.filter.is_none() {
-        if is_check {
-            for gate in ROOT_GATES {
-                if root_scripts.iter().any(|s| s == gate) {
+    for target in &opts.targets {
+        let is_check = target == "check" || target == "check:full";
+
+        // 1. Root-level gates (only when no package filter or git since scoping is active)
+        if opts.filter.is_none() && opts.since.is_none() {
+            if is_check {
+                for gate in ROOT_GATES {
+                    if root_scripts.iter().any(|s| s == gate) {
+                        let mut args = vec!["run".to_string(), gate.to_string()];
+                        args.extend(opts.passthrough_args.clone());
+                        task_specs.push(TaskSpec {
+                            name: gate.to_string(),
+                            runner_bin: runner_bin.clone(),
+                            args,
+                            cwd: root_dir.to_path_buf(),
+                            color_idx: 0,
+                            estimated_cost: estimate_cost(gate),
+                        });
+                    }
+                }
+
+                let test_target = if target == "check:full" {
+                    "test:all"
+                } else if root_scripts.iter().any(|s| s == "test:unit") {
+                    "test:unit"
+                } else if root_scripts.iter().any(|s| s == "test") {
+                    "test"
+                } else {
+                    ""
+                };
+
+                if !test_target.is_empty() && root_scripts.iter().any(|s| s == test_target) {
+                    let mut args = vec!["run".to_string(), test_target.to_string()];
+                    args.extend(opts.passthrough_args.clone());
                     task_specs.push(TaskSpec {
-                        name: gate.to_string(),
+                        name: test_target.to_string(),
                         runner_bin: runner_bin.clone(),
-                        args: vec!["run".to_string(), gate.to_string()],
+                        args,
                         cwd: root_dir.to_path_buf(),
                         color_idx: 0,
-                        estimated_cost: estimate_cost(gate),
+                        estimated_cost: estimate_cost(test_target),
                     });
+                }
+            } else if root_scripts.iter().any(|s| s == target) {
+                let mut args = vec!["run".to_string(), target.clone()];
+                args.extend(opts.passthrough_args.clone());
+                task_specs.push(TaskSpec {
+                    name: target.clone(),
+                    runner_bin: runner_bin.clone(),
+                    args,
+                    cwd: root_dir.to_path_buf(),
+                    color_idx: 0,
+                    estimated_cost: estimate_cost(target),
+                });
+            }
+        }
+
+        // 2. Package tasks
+        let script_for_pkgs = if is_check {
+            "typecheck"
+        } else {
+            target.as_str()
+        };
+
+        for pkg in &pkgs {
+            if !pkg.scripts.iter().any(|s| s == script_for_pkgs) {
+                continue;
+            }
+
+            // Filter by glob pattern
+            if let Some(ref filter_pat) = opts.filter {
+                if !glob_match(filter_pat, &pkg.name) {
+                    continue;
                 }
             }
 
-            let test_target = if opts.target == "check:full" {
-                "test:all"
-            } else if root_scripts.iter().any(|s| s == "test:unit") {
-                "test:unit"
-            } else if root_scripts.iter().any(|s| s == "test") {
-                "test"
-            } else {
-                ""
-            };
-
-            if !test_target.is_empty() && root_scripts.iter().any(|s| s == test_target) {
-                task_specs.push(TaskSpec {
-                    name: test_target.to_string(),
-                    runner_bin: runner_bin.clone(),
-                    args: vec!["run".to_string(), test_target.to_string()],
-                    cwd: root_dir.to_path_buf(),
-                    color_idx: 0,
-                    estimated_cost: estimate_cost(test_target),
-                });
+            // Filter by Git affected set
+            if let Some(ref affected_set) = affected_names {
+                if !affected_set.contains(&pkg.name) {
+                    continue;
+                }
             }
-        } else if root_scripts.iter().any(|s| s == &opts.target) {
+
+            let task_name = format!("{}:{}", pkg.name, script_for_pkgs);
+            let mut args = vec!["run".to_string(), script_for_pkgs.to_string()];
+            args.extend(opts.passthrough_args.clone());
+
             task_specs.push(TaskSpec {
-                name: opts.target.clone(),
+                name: task_name.clone(),
                 runner_bin: runner_bin.clone(),
-                args: vec!["run".to_string(), opts.target.clone()],
-                cwd: root_dir.to_path_buf(),
+                args,
+                cwd: pkg.dir.clone(),
                 color_idx: 0,
-                estimated_cost: estimate_cost(&opts.target),
+                estimated_cost: estimate_cost(&task_name),
             });
         }
-    }
-
-    // 2. Workspace package tasks
-    let pkgs = discover_workspace_packages(root_dir)?;
-    for pkg in pkgs {
-        if !pkg.scripts.iter().any(|s| s == script_for_pkgs) {
-            continue;
-        }
-
-        if let Some(ref filter_pat) = opts.filter {
-            if !glob_match(filter_pat, &pkg.name) {
-                continue;
-            }
-        }
-
-        let task_name = format!("{}:{}", pkg.name, script_for_pkgs);
-        task_specs.push(TaskSpec {
-            name: task_name.clone(),
-            runner_bin: runner_bin.clone(),
-            args: vec!["run".to_string(), script_for_pkgs.to_string()],
-            cwd: pkg.dir,
-            color_idx: 0,
-            estimated_cost: estimate_cost(&task_name),
-        });
     }
 
     // Assign cyclic palette colors
@@ -310,23 +416,40 @@ pub fn build_tasks(opts: &Options, root_dir: &Path) -> Result<Vec<TaskSpec>, Str
         spec.color_idx = i % 7;
     }
 
-    Ok(task_specs)
+    Ok((task_specs, pkgs))
 }
 
 fn build_cargo_tasks(opts: &Options, root_dir: &Path) -> Result<Vec<TaskSpec>, String> {
     if opts.filter.is_some() {
         return Err(
-            "--filter is not supported for Cargo workspaces; Cargo runs the workspace as one task"
+            "--filter is not supported for pure Cargo workspaces; Cargo runs the workspace as one unit"
                 .to_string(),
         );
     }
 
-    let task_defs: &[(&str, &[&str])] = match opts.target.as_str() {
-        "check" | "check:full" => &[
-            ("fmt-check", &["fmt", "--all", "--", "--check"]),
-            (
+    let mut task_specs = Vec::new();
+
+    for target in &opts.targets {
+        let task_defs: Vec<(&str, Vec<&str>)> = match target.as_str() {
+            "check" | "check:full" => vec![
+                ("fmt-check", vec!["fmt", "--all", "--", "--check"]),
+                (
+                    "lint",
+                    vec![
+                        "clippy",
+                        "--workspace",
+                        "--all-targets",
+                        "--",
+                        "-D",
+                        "warnings",
+                    ],
+                ),
+                ("test", vec!["test", "--workspace"]),
+            ],
+            "fmt" | "fmt-check" => vec![("fmt-check", vec!["fmt", "--all", "--", "--check"])],
+            "lint" | "clippy" => vec![(
                 "lint",
-                &[
+                vec![
                     "clippy",
                     "--workspace",
                     "--all-targets",
@@ -334,41 +457,31 @@ fn build_cargo_tasks(opts: &Options, root_dir: &Path) -> Result<Vec<TaskSpec>, S
                     "-D",
                     "warnings",
                 ],
-            ),
-            ("test", &["test", "--workspace"]),
-        ],
-        "fmt-check" => &[("fmt-check", &["fmt", "--all", "--", "--check"])],
-        "lint" => &[(
-            "lint",
-            &[
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--",
-                "-D",
-                "warnings",
-            ],
-        )],
-        "test" => &[("test", &["test", "--workspace"])],
-        other => {
-            return Err(format!(
-                "unknown Cargo target '{other}'; use check, fmt-check, lint, or test"
-            ));
-        }
-    };
+            )],
+            "test" => vec![("test", vec!["test", "--workspace"])],
+            "build" => vec![("build", vec!["build", "--workspace"])],
+            other => {
+                return Err(format!(
+                    "unknown Cargo target '{other}'; use check, fmt-check, lint, test, or build"
+                ));
+            }
+        };
 
-    Ok(task_defs
-        .iter()
-        .enumerate()
-        .map(|(color_idx, (name, args))| TaskSpec {
-            name: (*name).to_string(),
-            runner_bin: "cargo".to_string(),
-            args: args.iter().map(|arg| (*arg).to_string()).collect(),
-            cwd: root_dir.to_path_buf(),
-            color_idx: color_idx % 7,
-            estimated_cost: estimate_cost(name),
-        })
-        .collect())
+        for (name, args) in task_defs {
+            let mut full_args: Vec<String> = args.into_iter().map(String::from).collect();
+            full_args.extend(opts.passthrough_args.clone());
+            task_specs.push(TaskSpec {
+                name: name.to_string(),
+                runner_bin: "cargo".to_string(),
+                args: full_args,
+                cwd: root_dir.to_path_buf(),
+                color_idx: task_specs.len() % 7,
+                estimated_cost: estimate_cost(name),
+            });
+        }
+    }
+
+    Ok(task_specs)
 }
 
 #[cfg(test)]
@@ -389,7 +502,7 @@ mod tests {
     #[test]
     fn cargo_workspace_builds_quality_tasks() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let tasks = build_tasks(&Options::default(), &root).unwrap();
+        let (tasks, _) = build_tasks(&Options::default(), &root).unwrap();
 
         assert_eq!(
             tasks
@@ -407,4 +520,35 @@ mod tests {
         let member = root.join("crates/webdriver");
         assert_eq!(find_workspace_root(&member).unwrap(), root);
     }
+}
+
+#[test]
+fn parse_turbo_pipeline_rules() {
+    let tmp = std::env::temp_dir().join("fanout-test-turbo-json");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let turbo_json = r#"{
+            "tasks": {
+                "build": {
+                    "dependsOn": ["^build"]
+                },
+                "test": {
+                    "dependsOn": ["build"]
+                }
+            }
+        }"#;
+    fs::write(tmp.join("turbo.json"), turbo_json).unwrap();
+
+    let pipeline = read_turbo_pipeline(&tmp).expect("should parse turbo.json");
+    assert_eq!(
+        pipeline.task_rules.get("build").unwrap().depends_on,
+        vec!["^build"]
+    );
+    assert_eq!(
+        pipeline.task_rules.get("test").unwrap().depends_on,
+        vec!["build"]
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
 }

@@ -28,7 +28,7 @@ local-tools/
 | **`portkill`** | Sub-millisecond port inspector and process killer | `portkill`<br>`portkill 3000 8080`<br>`portkill -f node` |
 | **`jwt`** | Zero-dependency JWT inspector, claim extractor & claim humanizer | `jwt <TOKEN>`<br>`pbpaste \| jwt`<br>`jwt -c exp,sub <TOKEN>` |
 | **`devclean`** | Multi-ecosystem build artifact scanner & disk space reclaimer | `devclean`<br>`devclean ~/dev --clean`<br>`devclean -t rust,node` |
-| **`fanout`** | Concurrent quality gate & task matrix runner with live interactive TUI | `fanout`<br>`fanout check:full --bail`<br>`fanout --filter '@renkonos/*'` |
+| **`fanout`** | Concurrent quality gate & task matrix runner with topological DAG, Git change detection & live TUI | `fanout`<br>`fanout lint typecheck test --bail`<br>`fanout --since main`<br>`fanout --filter '@renkonos/*' --topological` |
 | **`webdriver`** | Zero-dependency browser automation, persistent sessions & screenshot engine. Terse one-line-per-step output (`ok` / `warn` / `err`), `text=` and `role=` locators, buffered console errors, streaming `--repl` | `webdriver --session my-app http://localhost:3000 wait-for-hydration click 'role=button:Save' console`<br>`webdriver https://app.dev viewport 1440 900 screenshot out.png --full-page`<br>`webdriver --repl < script.wd`<br>`webdriver --list-sessions` |
 
 ## Conventions

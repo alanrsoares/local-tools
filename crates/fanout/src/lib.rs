@@ -1,8 +1,10 @@
-//! `fanout` — concurrent quality gate & task matrix runner.
+//! `fanout` — concurrent quality gate & task matrix runner (inspired by Turborepo).
 
 pub mod cli;
+pub mod dag;
 pub mod json;
 pub mod runner;
+pub mod scm;
 pub mod ui;
 pub mod workspace;
 
@@ -47,7 +49,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> i32 {
                 }
             };
 
-            let tasks = match workspace::build_tasks(&opts, &root_dir) {
+            let (tasks, pkgs) = match workspace::build_tasks(&opts, &root_dir) {
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("fanout: {e}");
@@ -55,7 +57,9 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> i32 {
                 }
             };
 
-            runner::execute_tasks(tasks, opts)
+            let pipeline = workspace::read_turbo_pipeline(&root_dir);
+
+            runner::execute_tasks(tasks, pkgs, pipeline, opts)
         }
     }
 }

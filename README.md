@@ -1,6 +1,6 @@
 # local-tools
 
-Fast, single-purpose Rust binaries that automate **Alan R. Soares'** day-to-day
+Fast, single-purpose Rust binaries that automate **Alan's** day-to-day
 developer workflows on this machine (macOS Apple Silicon).
 
 The repo is a **Cargo workspace**: a thin, shared `local-common` crate plus one
@@ -18,27 +18,29 @@ local-tools/
 └── README.md
 ```
 
+## Included Tools
+
+| Tool | Purpose | Key Commands |
+| :--- | :--- | :--- |
+| **`scaffold`** | Instant offline project scaffolder (TS/Bun/Biome, Rust, Go, Python/uv) | `scaffold ts -n my-app`<br>`scaffold rust`<br>`scaffold --list` |
+| **`portkill`** | Sub-millisecond port inspector and process killer | `portkill`<br>`portkill 3000 8080`<br>`portkill -f node` |
+| **`jwt`** | Zero-dependency JWT inspector, claim extractor & claim humanizer | `jwt <TOKEN>`<br>`pbpaste \| jwt`<br>`jwt -c exp,sub <TOKEN>` |
+| **`devclean`** | Multi-ecosystem build artifact scanner & disk space reclaimer | `devclean`<br>`devclean ~/dev --clean`<br>`devclean -t rust,node` |
+| **`fanout`** | Concurrent quality gate & task matrix runner with live interactive TUI | `fanout`<br>`fanout check:full --bail`<br>`fanout --filter '@renkonos/*'` |
+
 ## Conventions
 
 * **Edition 2021, `unsafe_code = "forbid"`, `clippy::all = warn`** — enforced
   workspace-wide via `[workspace.lints]`; every crate opts in with
   `[lints] workspace = true`.
-* **`local-common` is dependency-free** (std only). It builds with no network,
-  which keeps every tool's first `cargo build` fast and offline-friendly.
+* **Zero external dependencies** (std only across crates). Builds and tests fully offline
+  with instant compilation speed.
 * **Per-tool homes are predictable**: `~/.config/local-tools/<tool>/` for
   config, `~/.local/share/local-tools/<tool>/` for data — XDG-style on purpose
   to match the rest of this machine's `~/.config/` dotfiles.
 * **`Cargo.lock` is committed** — this is a binary-producing workspace.
 
 ## Adding a new tool
-
-```bash
-cargo new crates/<tool-name> --bin --vcs none \
-     -d local-common --features-local-common  # pseudo; see below
-cargo add local-common --features-local-common # pseudo
-```
-
-In practice:
 
 1. `mkdir crates/<tool> && cd crates/<tool>`
 2. Write a `Cargo.toml` inheriting common fields:
@@ -55,17 +57,20 @@ In practice:
    path = "src/main.rs"
 
    [dependencies]
-   local-common = { path = "../local-common", version = "0.1.0" }
+   local-common = { path = "../local-common" }
+
    [lints]
    workspace = true
    ```
-3. Add `crates/<tool>` to the `members` array in the root `Cargo.toml`.
+3. Add `"crates/<tool>"` to the `members` array in the root `Cargo.toml`.
 4. `cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
 
 ## Status
 
 - ✅ Workspace scaffolding + CI-ready lint policy + `.gitignore`.
-- ✅ `local-common` — per-tool path resolution (`tool_config_dir` /
-  `tool_data_dir`) and terminal-aware colour helpers (`Colour`,
-  `color_enabled_for`). Test-covered.
-- ⏳ First tool — _pending your pick_ (see conversation / `TODO: first tool`).
+- ✅ `local-common` — per-tool path resolution and terminal-aware colour helpers. Test-covered.
+- ✅ `scaffold` — offline project generator (TypeScript, Rust, Go, Python). Test-covered.
+- ✅ `portkill` — fast port inspector & process killer. Test-covered.
+- ✅ `jwt` — zero-dependency JWT decoder & timestamp humanizer. Test-covered.
+- ✅ `devclean` — multi-ecosystem project artifact scanner & reclaimer. Test-covered.
+- ✅ `fanout` — concurrent quality gate & task matrix runner with interactive TUI. Test-covered.

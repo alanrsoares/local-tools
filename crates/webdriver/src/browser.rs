@@ -17,7 +17,6 @@ pub struct BrowserInstance {
     child: Child,
     user_data_dir: PathBuf,
     is_persistent: bool,
-    session: Option<CdpSession>,
 }
 
 impl BrowserInstance {
@@ -66,6 +65,11 @@ impl BrowserInstance {
             .arg("about:blank")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+
+        // Chrome forks renderer/GPU helper subprocesses; put it in its own
+        // process group so Drop can sweep away the whole tree, not just the
+        // top-level process.
+        local_common::process::own_process_group(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| {
             format!(
@@ -119,13 +123,11 @@ impl BrowserInstance {
                     child,
                     user_data_dir: data_dir,
                     is_persistent,
-                    session: None,
                 },
                 session,
             )),
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                local_common::process::terminate(&mut child);
                 if !is_persistent {
                     let _ = fs::remove_dir_all(&data_dir);
                 }
@@ -137,11 +139,7 @@ impl BrowserInstance {
 
 impl Drop for BrowserInstance {
     fn drop(&mut self) {
-        if let Some(mut session) = self.session.take() {
-            let _ = session.close_browser();
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        local_common::process::terminate(&mut self.child);
         if !self.is_persistent {
             let _ = fs::remove_dir_all(&self.user_data_dir);
         }

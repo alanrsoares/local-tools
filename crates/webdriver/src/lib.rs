@@ -363,6 +363,11 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<(), String> {
         }
     }
 
+    // Ask Chrome to shut down cleanly before `_instance`'s Drop force-kills
+    // the process group; the latter is the safety net for the error paths
+    // above (each bails out via `?` before reaching here).
+    let _ = session.close_browser();
+
     if !opts.quiet {
         let _ = writeln!(
             out,

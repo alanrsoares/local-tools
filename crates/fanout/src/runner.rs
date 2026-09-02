@@ -2,8 +2,6 @@
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Write};
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -376,8 +374,7 @@ fn run_single_task(
 
     // Each task owns a process group so cancellation also reaches package
     // managers and their subprocesses, not only the immediate runner.
-    #[cfg(unix)]
-    cmd.process_group(0);
+    local_common::process::own_process_group(&mut cmd);
 
     if color_opt {
         cmd.env("FORCE_COLOR", "1");
@@ -455,12 +452,12 @@ fn run_single_task(
 
     let (outcome, exit_code) = loop {
         if bail_ref.load(Ordering::SeqCst) {
-            terminate_task(&mut child);
+            local_common::process::terminate(&mut child);
             break (Outcome::Cancelled, 0);
         }
 
         if task_start.elapsed() >= timeout {
-            terminate_task(&mut child);
+            local_common::process::terminate(&mut child);
             break (Outcome::Timeout, 124);
         }
 
@@ -494,18 +491,6 @@ fn run_single_task(
     };
 
     (outcome, exit_code, tail_lines)
-}
-
-fn terminate_task(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        // A negative PID targets the process group created above.
-        let _ = Command::new("kill")
-            .args(["-TERM", &format!("-{}", child.id())])
-            .status();
-    }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 fn clear_pinned(out: &mut impl Write, count: usize) {

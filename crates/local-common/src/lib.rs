@@ -15,7 +15,10 @@ pub mod paths;
 pub mod term;
 
 pub use paths::{tool_config_dir, tool_data_dir};
-pub use term::{color_enabled_for, is_terminal, Colour};
+pub use term::{
+    color_enabled_for, draw_meter, format_duration, is_terminal, strip_ansi, terminal_columns,
+    visible_width, Colour, CursorGuard, PALETTE, SPINNER,
+};
 
 /// The shared, human-readable project name. Handy for `--help` strings and
 /// log banners so every tool speaks the same language.

@@ -29,7 +29,7 @@ local-tools/
 | **`jwt`** | Zero-dependency JWT inspector, claim extractor & claim humanizer | `jwt <TOKEN>`<br>`pbpaste \| jwt`<br>`jwt -c exp,sub <TOKEN>` |
 | **`devclean`** | Multi-ecosystem build artifact scanner & disk space reclaimer | `devclean`<br>`devclean ~/dev --clean`<br>`devclean -t rust,node` |
 | **`fanout`** | Concurrent quality gate & task matrix runner with live interactive TUI | `fanout`<br>`fanout check:full --bail`<br>`fanout --filter '@renkonos/*'` |
-| **`webdriver`** | Zero-dependency browser automation, persistent sessions & screenshot engine | `webdriver --session my-app http://localhost:3000 wait-for '.btn' --screenshot`<br>`webdriver https://app.dev viewport 1440 900 screenshot out.png --full-page`<br>`webdriver --list-sessions` |
+| **`webdriver`** | Zero-dependency browser automation, persistent sessions & screenshot engine. Terse one-line-per-step output (`ok` / `warn` / `err`), `text=` and `role=` locators, buffered console errors, streaming `--repl` | `webdriver --session my-app http://localhost:3000 wait-for-hydration click 'role=button:Save' console`<br>`webdriver https://app.dev viewport 1440 900 screenshot out.png --full-page`<br>`webdriver --repl < script.wd`<br>`webdriver --list-sessions` |
 
 ## Conventions
 

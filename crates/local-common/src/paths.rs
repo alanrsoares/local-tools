@@ -4,11 +4,12 @@
 //!    1. The matching `XDG_CONFIG_HOME` / `XDG_DATA_HOME` override, if set.
 //!    2. A conventional fallback rooted at the user's home directory.
 //!
-//! macOS note: the fallback is XDG-style (`~/.config/...` for config and
+//! On macOS the fallback is XDG-style (`~/.config/...` for config and
 //! `~/.local/share/...` for data) rather than `~/Library/...`, matching how
 //! the rest of this machine's dotfiles are laid out (`~/.config/zsh`,
-//! `~/.config/starship`, `~/.config/mise`, …). Each tool then gets a
-//! predictable `~/.config/local-tools/<tool>/` home.
+//! `~/.config/starship`, `~/.config/mise`, …). On Linux this is already the
+//! native convention. Each tool then gets a predictable
+//! `~/.config/local-tools/<tool>/` home.
 
 use std::env;
 use std::fs;

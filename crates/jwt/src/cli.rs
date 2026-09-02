@@ -45,7 +45,8 @@ pub const HELP: &str = r#"jwt [TOKEN] [OPTIONS] — inspect and decode JSON Web 
 
 USAGE
     jwt eyJhbGci...               # decode and display token info
-    pbpaste | jwt                 # read from clipboard via stdin
+    pbpaste | jwt                 # read from clipboard via stdin (macOS)
+    xclip -o -sel clip | jwt      # ...or wl-paste | jwt (Linux)
     jwt -p <TOKEN>                # output payload JSON only
     jwt -c exp,sub,roles <TOKEN>  # extract specific claim values
 

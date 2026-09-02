@@ -341,8 +341,13 @@ pub fn find_browser(custom: Option<&str>) -> Result<PathBuf, String> {
         "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
         "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
         "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
         "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
         "/usr/bin/brave-browser",
+        "/usr/bin/microsoft-edge",
+        "/usr/bin/microsoft-edge-stable",
+        "/snap/bin/chromium",
     ];
 
     for path in candidates {
@@ -355,7 +360,15 @@ pub fn find_browser(custom: Option<&str>) -> Result<PathBuf, String> {
     // Check PATH
     if let Ok(path_var) = env::var("PATH") {
         for dir in env::split_paths(&path_var) {
-            for bin_name in &["chromium", "google-chrome", "brave", "msedge"] {
+            for bin_name in &[
+                "chromium",
+                "chromium-browser",
+                "google-chrome",
+                "google-chrome-stable",
+                "brave-browser",
+                "microsoft-edge",
+                "microsoft-edge-stable",
+            ] {
                 let full = dir.join(bin_name);
                 if full.is_file() {
                     return Ok(full);

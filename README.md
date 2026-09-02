@@ -1,7 +1,9 @@
 # local-tools
 
 Fast, single-purpose Rust binaries that automate **Alan's** day-to-day
-developer workflows on this machine (macOS Apple Silicon).
+developer workflows. Primary target is Alan's machine (macOS Apple Silicon);
+the workspace is std-only and builds/tests clean on Linux too, and CI runs
+both.
 
 The repo is a **Cargo workspace**: a thin, shared `local-common` crate plus one
 crate per tool. Tools are intentionally small, dependency-light, and replace

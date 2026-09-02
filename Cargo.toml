@@ -1,10 +1,12 @@
 # ==============================================================================
 #  local-tools — workspace manifest
 #
-#  Fast, single-purpose Rust binaries that automate this machine's day-to-day
-#  developer workflows (macOS Apple Silicon). Each tool is its own crate under
-#  `crates/` and depends on `local-common` for shared plumbing (paths, terminal
-#  helpers, …). See README.md for the vision and how to add a new tool.
+#  Fast, single-purpose Rust binaries that automate day-to-day developer
+#  workflows. Primary target is macOS Apple Silicon, but the workspace is
+#  std-only and builds/tests clean on Linux too (CI runs both). Each tool is
+#  its own crate under `crates/` and depends on `local-common` for shared
+#  plumbing (paths, terminal helpers, …). See README.md for the vision and
+#  how to add a new tool.
 # ==============================================================================
 
 [workspace]

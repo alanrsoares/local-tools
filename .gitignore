@@ -13,3 +13,7 @@ release/
 
 # --- Local / per-user overrides (committed, but not the build) -----------
 # .local/ holds machine-specific overrides that stay out of the tree below.
+
+# --- Local tool state (per-machine, not shared) ---------------------------
+.claude/
+.serena/

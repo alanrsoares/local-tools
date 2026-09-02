@@ -1,0 +1,21 @@
+[package]
+name = "fanout"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fanout"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fanout"
+path = "src/main.rs"
+
+[dependencies]
+local-common = { path = "../local-common" }
+
+[lints]
+workspace = true

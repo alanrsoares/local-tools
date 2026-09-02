@@ -90,19 +90,43 @@ pub fn terminal_columns() -> usize {
 }
 
 /// Strip ANSI escape sequences from a string to measure printable width.
+///
+/// Handles both CSI sequences (`ESC [ ... <final byte>`, e.g. SGR colour
+/// codes) and OSC sequences (`ESC ] ... BEL` or `ESC ] ... ESC \`, e.g.
+/// [`Colour::link`] hyperlinks) — the latter's payload (a URL) can't be
+/// assumed free of the letters a naive scan would stop on.
 pub fn strip_ansi(s: &str) -> String {
+    #[derive(PartialEq)]
+    enum State {
+        Normal,
+        Escape,
+        Csi,
+        Osc,
+        OscEscape,
+    }
+
     let mut out = String::with_capacity(s.len());
-    let mut in_escape = false;
+    let mut state = State::Normal;
     for c in s.chars() {
-        if c == '\x1b' {
-            in_escape = true;
-        } else if in_escape {
-            if c == 'm' || c == 'K' || c == 'H' || c == 'J' || c == 'F' {
-                in_escape = false;
+        state = match state {
+            State::Normal if c == '\x1b' => State::Escape,
+            State::Normal => {
+                out.push(c);
+                State::Normal
             }
-        } else {
-            out.push(c);
-        }
+            State::Escape => match c {
+                '[' => State::Csi,
+                ']' => State::Osc,
+                _ => State::Normal, // unrecognized single-char escape
+            },
+            State::Csi if ('\x40'..='\x7e').contains(&c) => State::Normal,
+            State::Csi => State::Csi,
+            State::Osc if c == '\x07' => State::Normal,
+            State::Osc if c == '\x1b' => State::OscEscape,
+            State::Osc => State::Osc,
+            State::OscEscape if c == '\\' => State::Normal,
+            State::OscEscape => State::Osc,
+        };
     }
     out
 }
@@ -225,6 +249,43 @@ impl Colour {
     pub fn cyan(&self, text: impl AsRef<str>) -> String {
         self.wrap("36", text.as_ref())
     }
+
+    /// OSC 8 terminal hyperlink: cmd/ctrl-click on supporting terminals
+    /// (iTerm2, WezTerm, kitty, Ghostty, VS Code's integrated terminal, …)
+    /// opens `url` directly. No-ops to plain `text` when disabled, so piping
+    /// or a dumb terminal never sees raw escape codes.
+    pub fn link(&self, text: impl AsRef<str>, url: impl AsRef<str>) -> String {
+        let text = text.as_ref();
+        if !self.enabled {
+            return text.to_string();
+        }
+        format!("\x1b]8;;{}\x1b\\{text}\x1b]8;;\x1b\\", url.as_ref())
+    }
+}
+
+/// Build a `file://` URI for `path`, percent-encoding bytes that are unsafe
+/// inside a URI (spaces, non-ASCII, …). Relative paths are resolved against
+/// the current working directory; the target need not exist yet, so this is
+/// safe to call before a file has been written.
+pub fn file_uri(path: &std::path::Path) -> String {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    let mut uri = String::from("file://");
+    for byte in abs.to_string_lossy().bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                uri.push(byte as char)
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri
 }
 
 #[cfg(test)]
@@ -269,5 +330,43 @@ mod tests {
         let s = "\x1b[31mhello\x1b[0m world";
         assert_eq!(strip_ansi(s), "hello world");
         assert_eq!(visible_width(s), 11);
+    }
+
+    #[test]
+    fn strip_ansi_handles_osc_hyperlinks() {
+        // The URL payload deliberately contains letters (m, K, H, J, F) the
+        // old naive CSI-only scanner would have mistaken for a terminator.
+        let s = "\x1b]8;;file:///tmp/masterKHJFile.png\x1b\\click me\x1b]8;;\x1b\\ done";
+        assert_eq!(strip_ansi(s), "click me done");
+    }
+
+    #[test]
+    fn disabled_colour_link_returns_text_verbatim() {
+        let c = Colour::new(false);
+        assert_eq!(c.link("out.png", "file:///tmp/out.png"), "out.png");
+    }
+
+    #[test]
+    fn enabled_colour_link_wraps_with_osc8() {
+        let c = Colour::new(true);
+        assert_eq!(
+            c.link("out.png", "file:///tmp/out.png"),
+            "\x1b]8;;file:///tmp/out.png\x1b\\out.png\x1b]8;;\x1b\\"
+        );
+    }
+
+    #[test]
+    fn file_uri_resolves_absolute_paths_and_encodes_spaces() {
+        assert_eq!(
+            file_uri(std::path::Path::new("/tmp/my dir/out.png")),
+            "file:///tmp/my%20dir/out.png"
+        );
+    }
+
+    #[test]
+    fn file_uri_resolves_relative_paths_against_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        let expected = format!("file://{}/out.png", cwd.display());
+        assert_eq!(file_uri(std::path::Path::new("out.png")), expected);
     }
 }

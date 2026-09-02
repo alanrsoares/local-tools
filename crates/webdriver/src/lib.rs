@@ -10,9 +10,10 @@ pub mod json;
 use browser::BrowserInstance;
 use cli::{Action, CliOptions};
 use dsl::Step;
-use local_common::term::{format_duration, Colour};
+use local_common::term::{file_uri, format_duration, Colour};
 use std::fs;
 use std::io::Write;
+use std::path::Path;
 use std::time::Instant;
 
 pub fn run(args: &[String], out: &mut impl Write) -> Result<i32, String> {
@@ -55,7 +56,7 @@ pub fn run(args: &[String], out: &mut impl Write) -> Result<i32, String> {
                 "{} Cleared session '{}' ({})",
                 c.green("✓"),
                 c.bold(&name),
-                path.display()
+                c.link(path.display().to_string(), file_uri(&path))
             );
             Ok(0)
         }
@@ -283,7 +284,7 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<(), String> {
                         step_num,
                         opts.steps.len(),
                         c.bold("screenshot"),
-                        path,
+                        c.link(path, file_uri(Path::new(path))),
                         c.gray(if *full_page {
                             "(full-page)"
                         } else if let Some(s) = selector {
@@ -303,8 +304,8 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<(), String> {
                         "{} {}",
                         c.green("✓"),
                         c.gray(format!(
-                            "({} bytes, {})",
-                            bytes.len(),
+                            "({}, {})",
+                            format_size(bytes.len() as u64),
                             format_duration(step_start.elapsed())
                         ))
                     );
@@ -318,7 +319,7 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<(), String> {
                         step_num,
                         opts.steps.len(),
                         c.bold("pdf"),
-                        path
+                        c.link(path, file_uri(Path::new(path)))
                     );
                     let _ = out.flush();
                 }
@@ -331,8 +332,8 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<(), String> {
                         "{} {}",
                         c.green("✓"),
                         c.gray(format!(
-                            "({} bytes, {})",
-                            bytes.len(),
+                            "({}, {})",
+                            format_size(bytes.len() as u64),
                             format_duration(step_start.elapsed())
                         ))
                     );
@@ -350,7 +351,7 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<(), String> {
                             step_num,
                             opts.steps.len(),
                             c.bold("html"),
-                            p,
+                            c.link(p, file_uri(Path::new(p))),
                             c.green("✓"),
                             c.gray(format!("({})", format_duration(step_start.elapsed())))
                         );

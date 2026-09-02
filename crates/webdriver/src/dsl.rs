@@ -36,6 +36,40 @@ pub enum Step {
     Html {
         path: Option<String>,
     },
+    Reload {
+        timeout_ms: u64,
+    },
+    WaitForUrl {
+        substring: String,
+        timeout_ms: u64,
+    },
+    WaitForHydration {
+        quiet_ms: u64,
+        timeout_ms: u64,
+    },
+    Press {
+        chord: String,
+    },
+    Hover {
+        selector: String,
+    },
+    Url,
+    Title,
+    Console {
+        mode: ConsoleMode,
+    },
+    Close,
+}
+
+/// What `console` should print.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleMode {
+    /// Errors and warnings only, stacks truncated, repeats collapsed.
+    Errors,
+    /// Every buffered entry, untruncated and uncollapsed.
+    Full,
+    /// Drop the buffer.
+    Clear,
 }
 
 /// Parse a duration string like "60s", "500ms", "2m", "10".
@@ -115,7 +149,9 @@ pub fn tokenize_line(line: &str) -> Result<Vec<String>, String> {
             } else {
                 current.push(ch);
             }
-        } else if ch == '"' || ch == '\'' {
+        } else if (ch == '"' || ch == '\'') && current.is_empty() {
+            // Quotes only group when they open a token, so JS like
+            // `eval document.getElementById("out")` keeps its inner quotes.
             in_quote = Some(ch);
         } else if ch.is_whitespace() {
             if !current.is_empty() {
@@ -318,6 +354,98 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 };
                 steps.push(Step::Pdf { path });
             }
+            "reload" => {
+                idx += 1;
+                steps.push(Step::Reload {
+                    timeout_ms: default_timeout_ms,
+                });
+            }
+            "wait-for-url" => {
+                idx += 1;
+                if idx >= tokens.len() {
+                    return Err("'wait-for-url' requires a URL substring".to_string());
+                }
+                let substring = tokens[idx].clone();
+                idx += 1;
+                let mut timeout_ms = default_timeout_ms;
+                if idx < tokens.len() && !is_verb(&tokens[idx]) {
+                    if let Ok(d) = parse_duration_ms(&tokens[idx]) {
+                        timeout_ms = d;
+                        idx += 1;
+                    }
+                }
+                steps.push(Step::WaitForUrl {
+                    substring,
+                    timeout_ms,
+                });
+            }
+            "wait-for-hydration" | "settle" => {
+                idx += 1;
+                let mut quiet_ms = 500;
+                if idx < tokens.len() && !is_verb(&tokens[idx]) {
+                    if let Ok(d) = parse_duration_ms(&tokens[idx]) {
+                        quiet_ms = d;
+                        idx += 1;
+                    }
+                }
+                steps.push(Step::WaitForHydration {
+                    quiet_ms,
+                    timeout_ms: default_timeout_ms,
+                });
+            }
+            "press" | "key" => {
+                idx += 1;
+                if idx >= tokens.len() {
+                    return Err("'press' requires a key (e.g. Enter, Meta+O)".to_string());
+                }
+                steps.push(Step::Press {
+                    chord: tokens[idx].clone(),
+                });
+                idx += 1;
+            }
+            "hover" => {
+                idx += 1;
+                if idx >= tokens.len() {
+                    return Err("'hover' requires a locator".to_string());
+                }
+                steps.push(Step::Hover {
+                    selector: tokens[idx].clone(),
+                });
+                idx += 1;
+            }
+            "url" => {
+                idx += 1;
+                steps.push(Step::Url);
+            }
+            "title" => {
+                idx += 1;
+                steps.push(Step::Title);
+            }
+            "console" => {
+                idx += 1;
+                let mut mode = ConsoleMode::Errors;
+                if idx < tokens.len() {
+                    match tokens[idx].as_str() {
+                        "--errors" => {
+                            idx += 1;
+                        }
+                        "--full" => {
+                            mode = ConsoleMode::Full;
+                            idx += 1;
+                        }
+                        "--clear" => {
+                            mode = ConsoleMode::Clear;
+                            idx += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                steps.push(Step::Console { mode });
+            }
+            "close" | "quit" | "exit" => {
+                idx += 1;
+                steps.push(Step::Close);
+            }
             "html" | "--html" | "dump" => {
                 idx += 1;
                 let path = if idx < tokens.len()
@@ -379,6 +507,19 @@ fn is_verb(s: &str) -> bool {
             | "html"
             | "--html"
             | "dump"
+            | "reload"
+            | "wait-for-url"
+            | "wait-for-hydration"
+            | "settle"
+            | "press"
+            | "key"
+            | "hover"
+            | "url"
+            | "title"
+            | "console"
+            | "close"
+            | "quit"
+            | "exit"
     )
 }
 
@@ -461,6 +602,61 @@ mod tests {
                 selector: None,
             }
         );
+    }
+
+    #[test]
+    fn inner_quotes_survive_in_unquoted_tokens() {
+        let tokens = tokenize_line("eval document.getElementById(\"out\").textContent").unwrap();
+        assert_eq!(tokens[1], "document.getElementById(\"out\").textContent");
+
+        let quoted = tokenize_line("fill '#a' 'two words'").unwrap();
+        assert_eq!(quoted, vec!["fill", "#a", "two words"]);
+    }
+
+    #[test]
+    fn parse_new_verbs() {
+        let steps = parse_script(
+            "wait-for-url /dashboard 5s\nwait-for-hydration 300ms\npress Meta+O\nhover text=Save\nconsole --full\nurl\ntitle\nreload\nclose",
+            30_000,
+        )
+        .expect("parse failed");
+
+        assert_eq!(
+            steps[0],
+            Step::WaitForUrl {
+                substring: "/dashboard".to_string(),
+                timeout_ms: 5_000
+            }
+        );
+        assert_eq!(
+            steps[1],
+            Step::WaitForHydration {
+                quiet_ms: 300,
+                timeout_ms: 30_000
+            }
+        );
+        assert_eq!(
+            steps[2],
+            Step::Press {
+                chord: "Meta+O".to_string()
+            }
+        );
+        assert_eq!(
+            steps[3],
+            Step::Hover {
+                selector: "text=Save".to_string()
+            }
+        );
+        assert_eq!(
+            steps[4],
+            Step::Console {
+                mode: ConsoleMode::Full
+            }
+        );
+        assert_eq!(steps[5], Step::Url);
+        assert_eq!(steps[6], Step::Title);
+        assert_eq!(steps[7], Step::Reload { timeout_ms: 30_000 });
+        assert_eq!(steps[8], Step::Close);
     }
 
     #[test]

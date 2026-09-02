@@ -2,7 +2,6 @@
 
 use crate::dsl::{self, Step};
 use std::fs;
-use std::io::{self, Read};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -15,6 +14,11 @@ pub struct CliOptions {
     pub session_name: Option<String>,
     pub user_data_dir: Option<PathBuf>,
     pub steps: Vec<Step>,
+    /// Keep running after a failed step instead of aborting the batch.
+    pub keep_going: bool,
+    /// Read and execute one command per line from stdin, streaming results back
+    /// as each finishes, so the browser stays open across an interactive drive.
+    pub stream_stdin: bool,
 }
 
 pub enum Action {
@@ -39,6 +43,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
     let mut user_data_dir = None;
     let mut script_file = None;
     let mut read_stdin = false;
+    let mut keep_going = false;
 
     let mut step_tokens = Vec::new();
     let mut i = 0;
@@ -94,6 +99,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
             "-q" | "--quiet" => {
                 quiet = true;
             }
+            "--keep-going" | "--no-fail-fast" => {
+                keep_going = true;
+            }
             "-v" | "--verbose" => {
                 verbose = true;
             }
@@ -101,7 +109,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
                 i += 1;
                 script_file = Some(args[i].clone());
             }
-            "-" => {
+            "-" | "--repl" | "--stdin" => {
                 read_stdin = true;
             }
             other => {
@@ -113,14 +121,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
 
     let mut steps = Vec::new();
 
-    if read_stdin {
-        let mut buffer = String::new();
-        io::stdin()
-            .read_to_string(&mut buffer)
-            .map_err(|e| format!("failed to read script from stdin: {e}"))?;
-        let parsed = dsl::parse_script(&buffer, default_timeout_ms)?;
-        steps.extend(parsed);
-    } else if let Some(file_path) = script_file {
+    if let Some(file_path) = script_file {
         let content = fs::read_to_string(&file_path)
             .map_err(|e| format!("failed to read script file '{file_path}': {e}"))?;
         let parsed = dsl::parse_script(&content, default_timeout_ms)?;
@@ -132,7 +133,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
         steps.extend(parsed);
     }
 
-    if steps.is_empty() {
+    if steps.is_empty() && !read_stdin {
         return Ok(Action::Help);
     }
 
@@ -145,6 +146,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
         session_name,
         user_data_dir,
         steps,
+        keep_going,
+        stream_stdin: read_stdin,
     }))
 }
 
@@ -155,7 +158,12 @@ pub fn print_help() {
 \x1b[1mUSAGE:\x1b[0m
     webdriver [OPTIONS] <URL> [VERBS...]
     webdriver --session <NAME> <URL> [VERBS...]
-    webdriver [OPTIONS] - < script.wd
+    webdriver [OPTIONS] -f script.wd
+    webdriver [OPTIONS] --repl        # one command per stdin line, browser stays open
+
+\x1b[1mOUTPUT:\x1b[0m
+    One line per step: 'ok', 'ok <payload>', 'warn <detail>' or 'err <message>'.
+    Colour is off whenever stdout is not a TTY. Exit code is 1 if any step failed.
 
 \x1b[1mPERSISTENT AUTH & SESSIONS:\x1b[0m
     # Hop 1: Authenticate and store cookies/localStorage in 'my-app' session profile
@@ -168,18 +176,31 @@ pub fn print_help() {
     webdriver --list-sessions
     webdriver --clear-session my-app
 
+\x1b[1mLOCATORS\x1b[0m (anywhere a selector is accepted):
+    \x1b[1;33mtext=\x1b[0mSome label          Innermost element containing the text
+    \x1b[1;33mrole=\x1b[0mbutton:Save         ARIA role + accessible name
+    \x1b[1;33msel=\x1b[0m<css> or bare CSS    CSS selector
+
 \x1b[1mVERBS & ACTIONS:\x1b[0m
     \x1b[1;33mgoto\x1b[0m <url>                     Navigate to URL (default for initial URL)
-    \x1b[1;33mviewport\x1b[0m <w> <h>              Set window size (e.g. 1280 800 or 1280x800)
-    \x1b[1;33mwait-for\x1b[0m <sel> [timeout]       Poll DOM until CSS selector matches
+    \x1b[1;33mreload\x1b[0m                         Reload current page
+    \x1b[1;33mviewport\x1b[0m <w> <h>               Set window size (e.g. 1280 800 or 1280x800)
+    \x1b[1;33mwait-for\x1b[0m <loc> [timeout]       Wait until element is visible AND painted
+    \x1b[1;33mwait-for-url\x1b[0m <substr> [t]      Wait until URL contains substring (redirects)
+    \x1b[1;33mwait-for-hydration\x1b[0m [quiet]     Wait until DOM stops mutating (default 500ms)
     \x1b[1;33mwait\x1b[0m <duration>                Fixed sleep (e.g. 500ms, 2s, 1m)
-    \x1b[1;33mclick\x1b[0m <selector>               Click DOM element matching selector
-    \x1b[1;33mtype\x1b[0m <sel> <text>              Input text into selector
-    \x1b[1;33mfill\x1b[0m <sel> <text>              Clear and input text into selector
-    \x1b[1;33meval\x1b[0m <js_expr>                 Evaluate JavaScript in page context
-    \x1b[1;33mscreenshot\x1b[0m [path] [flags]     Capture PNG (flags: --full-page, --selector <sel>)
+    \x1b[1;33mclick\x1b[0m <locator>                Click element
+    \x1b[1;33mhover\x1b[0m <locator>                Real mouse move, so CSS :hover applies
+    \x1b[1;33mpress\x1b[0m <key>                    Key chord, e.g. Enter, Escape, Meta+O
+    \x1b[1;33mtype\x1b[0m <loc> <text>              Append text (fires React onChange)
+    \x1b[1;33mfill\x1b[0m <loc> <text>              Clear then type
+    \x1b[1;33meval\x1b[0m <js_expr>                 Evaluate JS, prints JSON result
+    \x1b[1;33murl\x1b[0m / \x1b[1;33mtitle\x1b[0m                   Print current URL / page title
+    \x1b[1;33mconsole\x1b[0m [--errors|--full|--clear]  Buffered console errors, repeats collapsed
+    \x1b[1;33mscreenshot\x1b[0m [path] [flags]      Capture PNG (flags: --full-page, --selector <loc>)
     \x1b[1;33mpdf\x1b[0m [path]                     Print page to PDF
     \x1b[1;33mhtml\x1b[0m [path]                    Dump current HTML to file or stdout
+    \x1b[1;33mclose\x1b[0m                          End the run (useful in --repl)
 
 \x1b[1mOPTIONS:\x1b[0m
     -s, --session <name>        Persistent session profile name (preserves cookies & storage)
@@ -188,9 +209,12 @@ pub fn print_help() {
         --clear-session <name>  Delete stored persistent session profile
     -b, --browser <path>        Custom browser binary (Chromium, Chrome, Brave)
     -t, --timeout <duration>    Default step timeout (default: 30s)
+    -f, --file <path>           Read a script file instead of CLI verbs
+        --repl, -               Stream commands from stdin, one per line
+        --keep-going            Continue after a failed step (default: stop)
         --headed                Show browser UI window (disable headless mode)
-    -q, --quiet                 Suppress progress output
-    -v, --verbose               Detailed step timing and logs
+    -q, --quiet                 Print only steps that carry a payload
+    -v, --verbose               Step numbers and timings
     -h, --help                  Print help and exit
     -V, --version               Print version and exit"
     );

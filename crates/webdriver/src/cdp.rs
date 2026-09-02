@@ -2,6 +2,7 @@
 
 use crate::base64;
 use crate::json::{self, JsonValue};
+use crate::locator;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -199,14 +200,116 @@ impl WebSocketClient {
     }
 }
 
+/// A console message or uncaught exception captured from the page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsoleEntry {
+    pub level: String,
+    pub text: String,
+}
+
+impl ConsoleEntry {
+    pub fn is_error(&self) -> bool {
+        matches!(self.level.as_str(), "error" | "warning" | "exception")
+    }
+}
+
 pub struct CdpSession {
     ws: WebSocketClient,
     next_id: u64,
+    console: Vec<ConsoleEntry>,
 }
 
 impl CdpSession {
     pub fn new(ws: WebSocketClient) -> Self {
-        Self { ws, next_id: 1 }
+        Self {
+            ws,
+            next_id: 1,
+            console: Vec::new(),
+        }
+    }
+
+    /// Console entries captured so far, oldest first.
+    pub fn console_entries(&self) -> &[ConsoleEntry] {
+        &self.console
+    }
+
+    pub fn clear_console(&mut self) {
+        self.console.clear();
+    }
+
+    /// Pump the socket so events emitted since the last command land in the
+    /// buffer. CDP delivers events before the reply to a later command, so a
+    /// trivial round-trip is enough to drain them.
+    pub fn drain_events(&mut self) -> Result<(), String> {
+        self.evaluate("0")?;
+        Ok(())
+    }
+
+    fn record_event(&mut self, val: &JsonValue) {
+        let Some(method) = val.get("method").and_then(|m| m.as_str()) else {
+            return;
+        };
+        let params = val.get("params");
+
+        let entry = match method {
+            "Runtime.consoleAPICalled" => {
+                let level = params
+                    .and_then(|p| p.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("log")
+                    .to_string();
+                let text = params
+                    .and_then(|p| p.get("args"))
+                    .and_then(|a| a.as_array())
+                    .map(|args| {
+                        args.iter()
+                            .map(describe_remote_object)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                Some(ConsoleEntry { level, text })
+            }
+            "Runtime.exceptionThrown" => {
+                let details = params.and_then(|p| p.get("exceptionDetails"));
+                let text = details
+                    .and_then(|d| d.get("exception"))
+                    .map(describe_remote_object)
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        details
+                            .and_then(|d| d.get("text"))
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| "uncaught exception".to_string());
+                Some(ConsoleEntry {
+                    level: "exception".to_string(),
+                    text,
+                })
+            }
+            "Log.entryAdded" => {
+                let entry = params.and_then(|p| p.get("entry"));
+                let level = entry
+                    .and_then(|e| e.get("level"))
+                    .and_then(|l| l.as_str())
+                    .unwrap_or("info")
+                    .to_string();
+                let text = entry
+                    .and_then(|e| e.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some(ConsoleEntry { level, text })
+            }
+            _ => None,
+        };
+
+        if let Some(entry) = entry {
+            if !entry.text.is_empty() {
+                self.console.push(entry);
+            }
+        }
     }
 
     pub fn call(&mut self, method: &str, params: JsonValue) -> Result<JsonValue, String> {
@@ -232,6 +335,7 @@ impl CdpSession {
 
             let msg = self.ws.read_text()?;
             let val = json::parse(&msg)?;
+            self.record_event(&val);
 
             if let Some(id_val) = val.get("id") {
                 if id_val.as_i64() == Some(req_id as i64) {
@@ -255,6 +359,8 @@ impl CdpSession {
         self.call("Page.enable", JsonValue::Object(HashMap::new()))?;
         self.call("Runtime.enable", JsonValue::Object(HashMap::new()))?;
         self.call("DOM.enable", JsonValue::Object(HashMap::new()))?;
+        // Log domain surfaces network/security failures the page never logs itself.
+        let _ = self.call("Log.enable", JsonValue::Object(HashMap::new()));
         Ok(())
     }
 
@@ -263,23 +369,26 @@ impl CdpSession {
         params.insert("url".to_string(), JsonValue::String(url.to_string()));
         self.call("Page.navigate", JsonValue::Object(params))?;
 
-        // Wait for page readyState
+        self.await_ready(timeout_ms);
+        Ok(())
+    }
+
+    /// Poll `document.readyState` until the document is usable. Returns whether
+    /// it got there; callers proceed regardless, matching prior behaviour.
+    fn await_ready(&mut self, timeout_ms: u64) -> bool {
         let start = Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
 
         while start.elapsed() < timeout {
-            let res = self.evaluate("document.readyState");
-            if let Ok(val) = res {
-                if let Some(state) = val.as_str() {
-                    if state == "interactive" || state == "complete" {
-                        return Ok(());
-                    }
+            if let Ok(val) = self.evaluate("document.readyState") {
+                if matches!(val.as_str(), Some("interactive") | Some("complete")) {
+                    return true;
                 }
             }
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        Ok(()) // Proceed even if readyState check timed out
+        false
     }
 
     pub fn set_viewport(&mut self, width: u32, height: u32) -> Result<(), String> {
@@ -324,61 +433,203 @@ impl CdpSession {
         Ok(JsonValue::Null)
     }
 
-    pub fn wait_for(&mut self, selector: &str, timeout_ms: u64) -> Result<(), String> {
+    /// Wait until `spec` resolves to an element that is visible *and* painted.
+    /// Two animation frames after the layout box appears rule out an `ok` that
+    /// really means "matched unpainted SSR markup".
+    pub fn wait_for(&mut self, spec: &str, timeout_ms: u64) -> Result<(), String> {
         let start = Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
-        let check_expr = format!(
-            "document.querySelector(\"{}\") !== null",
-            json::escape_str(selector)
-        );
+        let check_expr = locator::with_prelude(&format!(
+            "(() => {{ const el = window.__wd.find(\"{}\"); return !!el && window.__wd.visible(el); }})()",
+            json::escape_str(spec)
+        ));
 
         while start.elapsed() < timeout {
-            let res = self.evaluate(&check_expr);
-            if let Ok(JsonValue::Bool(true)) = res {
+            if let Ok(JsonValue::Bool(true)) = self.evaluate(&check_expr) {
+                self.evaluate(
+                    "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))",
+                )?;
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(50));
         }
 
         Err(format!(
-            "timed out waiting for selector '{selector}' after {timeout_ms}ms"
+            "timed out waiting for '{spec}' after {timeout_ms}ms"
         ))
     }
 
-    pub fn click(&mut self, selector: &str) -> Result<(), String> {
+    /// Wait until the current URL contains `substring`.
+    pub fn wait_for_url(&mut self, substring: &str, timeout_ms: u64) -> Result<String, String> {
+        let start = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms);
+
+        while start.elapsed() < timeout {
+            if let Ok(url) = self.current_url() {
+                if url.contains(substring) {
+                    return Ok(url);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        Err(format!(
+            "timed out waiting for URL containing '{substring}' after {timeout_ms}ms"
+        ))
+    }
+
+    /// Wait until the DOM stops mutating for `quiet_ms`. Generic "SPA settled"
+    /// signal, preferable to guessing with a fixed sleep.
+    pub fn wait_for_quiet(&mut self, quiet_ms: u64, timeout_ms: u64) -> Result<(), String> {
         let script = format!(
+            r#"new Promise((resolve) => {{
+                let last = Date.now();
+                const deadline = Date.now() + {timeout_ms};
+                const obs = new MutationObserver(() => {{ last = Date.now(); }});
+                obs.observe(document.documentElement, {{
+                    subtree: true, childList: true, attributes: true, characterData: true
+                }});
+                const iv = setInterval(() => {{
+                    const settled = Date.now() - last >= {quiet_ms};
+                    if (settled || Date.now() > deadline) {{
+                        clearInterval(iv);
+                        obs.disconnect();
+                        resolve(settled);
+                    }}
+                }}, 50);
+            }})"#
+        );
+
+        match self.evaluate(&script)? {
+            JsonValue::Bool(true) => Ok(()),
+            _ => Err(format!(
+                "DOM never stayed quiet for {quiet_ms}ms within {timeout_ms}ms"
+            )),
+        }
+    }
+
+    pub fn reload(&mut self, timeout_ms: u64) -> Result<String, String> {
+        self.call("Page.reload", JsonValue::Object(HashMap::new()))?;
+        self.await_ready(timeout_ms);
+        self.current_url()
+    }
+
+    pub fn current_url(&mut self) -> Result<String, String> {
+        Ok(self
+            .evaluate("location.href")?
+            .as_str()
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    pub fn title(&mut self) -> Result<String, String> {
+        Ok(self
+            .evaluate("document.title")?
+            .as_str()
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    /// Move the real mouse over the element so CSS `:hover` actually applies —
+    /// JS-dispatched mouse events do not trigger it.
+    pub fn hover(&mut self, spec: &str) -> Result<(), String> {
+        let center = self.evaluate(&locator::with_prelude(&format!(
             r#"(() => {{
-                const el = document.querySelector("{}");
-                if (!el) throw new Error("element not found: {}");
+                const el = window.__wd.require("{}");
+                el.scrollIntoView({{ block: "center", inline: "center" }});
+                const r = el.getBoundingClientRect();
+                return {{ x: r.left + r.width / 2, y: r.top + r.height / 2 }};
+            }})()"#,
+            json::escape_str(spec)
+        )))?;
+
+        let x = center.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let y = center.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+        let mut params = HashMap::new();
+        params.insert(
+            "type".to_string(),
+            JsonValue::String("mouseMoved".to_string()),
+        );
+        params.insert("x".to_string(), JsonValue::Number(x));
+        params.insert("y".to_string(), JsonValue::Number(y));
+        self.call("Input.dispatchMouseEvent", JsonValue::Object(params))?;
+        Ok(())
+    }
+
+    /// Send a key chord such as `Enter`, `Escape` or `Meta+O` to the focused element.
+    pub fn press(&mut self, chord: &str) -> Result<(), String> {
+        let mut modifiers = 0f64;
+        let mut key_part = chord;
+
+        for part in chord.split('+') {
+            match part.to_ascii_lowercase().as_str() {
+                "alt" | "option" => modifiers += 1.0,
+                "ctrl" | "control" => modifiers += 2.0,
+                "meta" | "cmd" | "command" => modifiers += 4.0,
+                "shift" => modifiers += 8.0,
+                _ => key_part = part,
+            }
+        }
+
+        let (key, code, vk, text) = key_descriptor(key_part)?;
+
+        for event in ["keyDown", "keyUp"] {
+            let mut params = HashMap::new();
+            params.insert("type".to_string(), JsonValue::String(event.to_string()));
+            params.insert("key".to_string(), JsonValue::String(key.clone()));
+            params.insert("code".to_string(), JsonValue::String(code.clone()));
+            params.insert("windowsVirtualKeyCode".to_string(), JsonValue::Number(vk));
+            params.insert("nativeVirtualKeyCode".to_string(), JsonValue::Number(vk));
+            params.insert("modifiers".to_string(), JsonValue::Number(modifiers));
+            if event == "keyDown" {
+                if let Some(ref t) = text {
+                    params.insert("text".to_string(), JsonValue::String(t.clone()));
+                }
+            }
+            self.call("Input.dispatchKeyEvent", JsonValue::Object(params))?;
+        }
+
+        Ok(())
+    }
+
+    pub fn click(&mut self, spec: &str) -> Result<(), String> {
+        let script = locator::with_prelude(&format!(
+            r#"(() => {{
+                const el = window.__wd.require("{}");
                 el.scrollIntoView({{ block: "center", inline: "center" }});
                 el.click();
                 return true;
             }})()"#,
-            json::escape_str(selector),
-            json::escape_str(selector)
-        );
+            json::escape_str(spec)
+        ));
 
         self.evaluate(&script)?;
         Ok(())
     }
 
-    pub fn type_text(&mut self, selector: &str, text: &str, clear: bool) -> Result<(), String> {
-        let script = format!(
+    /// Set a form field's value. Writes through the *native* value setter so a
+    /// React controlled input actually fires `onChange` — assigning `el.value`
+    /// directly is swallowed by React's value tracker.
+    pub fn type_text(&mut self, spec: &str, text: &str, clear: bool) -> Result<(), String> {
+        let script = locator::with_prelude(&format!(
             r#"(() => {{
-                const el = document.querySelector("{}");
-                if (!el) throw new Error("element not found: {}");
+                const el = window.__wd.require("{}");
                 el.focus();
-                {}
-                el.value += "{}";
+                const next = ({} ? "" : (el.value || "")) + "{}";
+                const proto = el instanceof HTMLTextAreaElement
+                    ? HTMLTextAreaElement.prototype
+                    : HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(proto, "value");
+                if (setter && setter.set) {{ setter.set.call(el, next); }} else {{ el.value = next; }}
                 el.dispatchEvent(new Event("input", {{ bubbles: true }}));
                 el.dispatchEvent(new Event("change", {{ bubbles: true }}));
                 return true;
             }})()"#,
-            json::escape_str(selector),
-            json::escape_str(selector),
-            if clear { "el.value = '';" } else { "" },
+            json::escape_str(spec),
+            if clear { "true" } else { "false" },
             json::escape_str(text)
-        );
+        ));
 
         self.evaluate(&script)?;
         Ok(())
@@ -393,16 +644,15 @@ impl CdpSession {
         params.insert("format".to_string(), JsonValue::String("png".to_string()));
 
         if let Some(sel) = selector {
-            let clip_script = format!(
+            let clip_script = locator::with_prelude(&format!(
                 r#"(() => {{
-                    const el = document.querySelector("{}");
-                    if (!el) throw new Error("element not found: {}");
+                    const el = window.__wd.require("{}");
+                    el.scrollIntoView({{ block: "center", inline: "center" }});
                     const r = el.getBoundingClientRect();
                     return {{ x: r.left, y: r.top, width: r.width, height: r.height }};
                 }})()"#,
-                json::escape_str(sel),
                 json::escape_str(sel)
-            );
+            ));
 
             let clip_val = self.evaluate(&clip_script)?;
             let x = clip_val.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -460,5 +710,72 @@ impl CdpSession {
     pub fn close_browser(&mut self) -> Result<(), String> {
         let _ = self.call("Browser.close", JsonValue::Object(HashMap::new()));
         Ok(())
+    }
+}
+
+/// Best-effort human rendering of a CDP `RemoteObject` for the console buffer.
+fn describe_remote_object(obj: &JsonValue) -> String {
+    if let Some(desc) = obj.get("description").and_then(|d| d.as_str()) {
+        return desc.to_string();
+    }
+    match obj.get("value") {
+        Some(JsonValue::String(s)) => s.clone(),
+        Some(other) => other.to_json_string(),
+        None => obj
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+/// Map a key name to the `(key, code, virtualKeyCode, text)` CDP needs.
+fn key_descriptor(name: &str) -> Result<(String, String, f64, Option<String>), String> {
+    let named = match name {
+        "Enter" | "enter" | "Return" => Some(("Enter", "Enter", 13.0, Some("\r"))),
+        "Tab" | "tab" => Some(("Tab", "Tab", 9.0, Some("\t"))),
+        "Escape" | "escape" | "Esc" | "esc" => Some(("Escape", "Escape", 27.0, None)),
+        "Backspace" | "backspace" => Some(("Backspace", "Backspace", 8.0, None)),
+        "Delete" | "delete" => Some(("Delete", "Delete", 46.0, None)),
+        "Space" | "space" => Some((" ", "Space", 32.0, Some(" "))),
+        "ArrowUp" | "Up" => Some(("ArrowUp", "ArrowUp", 38.0, None)),
+        "ArrowDown" | "Down" => Some(("ArrowDown", "ArrowDown", 40.0, None)),
+        "ArrowLeft" | "Left" => Some(("ArrowLeft", "ArrowLeft", 37.0, None)),
+        "ArrowRight" | "Right" => Some(("ArrowRight", "ArrowRight", 39.0, None)),
+        "Home" | "home" => Some(("Home", "Home", 36.0, None)),
+        "End" | "end" => Some(("End", "End", 35.0, None)),
+        "PageUp" => Some(("PageUp", "PageUp", 33.0, None)),
+        "PageDown" => Some(("PageDown", "PageDown", 34.0, None)),
+        _ => None,
+    };
+
+    if let Some((key, code, vk, text)) = named {
+        return Ok((
+            key.to_string(),
+            code.to_string(),
+            vk,
+            text.map(|t| t.to_string()),
+        ));
+    }
+
+    let mut chars = name.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => {
+            let upper = ch.to_ascii_uppercase();
+            let code = if ch.is_ascii_alphabetic() {
+                format!("Key{upper}")
+            } else if ch.is_ascii_digit() {
+                format!("Digit{ch}")
+            } else {
+                String::new()
+            };
+            Ok((
+                ch.to_string(),
+                code,
+                upper as u32 as f64,
+                Some(ch.to_string()),
+            ))
+        }
+        _ => Err(format!("unknown key '{name}'")),
     }
 }

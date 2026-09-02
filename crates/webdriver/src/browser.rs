@@ -137,6 +137,32 @@ impl BrowserInstance {
     }
 }
 
+impl BrowserInstance {
+    /// Shut the browser down cleanly so a persistent profile survives.
+    ///
+    /// Chrome writes cookies and localStorage to disk on exit; killing it
+    /// outright loses everything the run just authenticated. Ephemeral profiles
+    /// are thrown away anyway, so they skip the wait.
+    pub fn shutdown(&mut self, session: &mut CdpSession) {
+        if !self.is_persistent {
+            return;
+        }
+
+        let _ = session.close_browser();
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                _ => return,
+            }
+        }
+    }
+}
+
 impl Drop for BrowserInstance {
     fn drop(&mut self) {
         local_common::process::terminate(&mut self.child);

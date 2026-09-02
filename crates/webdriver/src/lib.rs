@@ -132,8 +132,12 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<i32, String> {
         let _ = writeln!(out, "{}", c.gray(format!("launching [{profile}]")));
     }
 
-    let (mut instance, mut session) =
-        BrowserInstance::launch(opts.custom_browser.as_deref(), opts.headless, target_dir)?;
+    let (mut instance, mut session) = BrowserInstance::launch(
+        opts.custom_browser.as_deref(),
+        opts.headless,
+        target_dir,
+        &opts.browser_args,
+    )?;
 
     let mut failures = 0;
     let mut step_num = 0;

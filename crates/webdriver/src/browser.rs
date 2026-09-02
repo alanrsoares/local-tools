@@ -24,6 +24,7 @@ impl BrowserInstance {
         custom_browser: Option<&str>,
         headless: bool,
         user_data_dir: Option<PathBuf>,
+        extra_args: &[String],
     ) -> Result<(Self, CdpSession), String> {
         let browser_path = find_browser(custom_browser)?;
 
@@ -61,8 +62,20 @@ impl BrowserInstance {
             .arg("--mute-audio")
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
-            .arg(format!("--user-data-dir={}", data_dir.display()))
-            .arg("about:blank")
+            .arg(format!("--user-data-dir={}", data_dir.display()));
+
+        // Chrome's sandbox cannot start as root, and a container's default 64 MB
+        // /dev/shm is too small for it — so a CI image needs both of these or the
+        // browser dies before DevTools ever comes up.
+        if running_as_root() {
+            cmd.arg("--no-sandbox").arg("--disable-dev-shm-usage");
+        }
+
+        for arg in extra_args {
+            cmd.arg(arg);
+        }
+
+        cmd.arg("about:blank")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
 
@@ -169,6 +182,25 @@ impl Drop for BrowserInstance {
         if !self.is_persistent {
             let _ = fs::remove_dir_all(&self.user_data_dir);
         }
+    }
+}
+
+/// Whether this process is root, which is the signature of a CI container.
+///
+/// Read from the owner of `/proc/self` rather than a `geteuid` binding, since
+/// this crate carries no dependencies. Non-Linux systems have no `/proc` and
+/// report `false` — where the sandbox flags are not needed anyway.
+fn running_as_root() -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata("/proc/self")
+            .map(|m| m.uid() == 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        false
     }
 }
 
@@ -431,7 +463,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(&browser, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let result = BrowserInstance::launch(Some(browser.to_str().unwrap()), true, None);
+        let result = BrowserInstance::launch(Some(browser.to_str().unwrap()), true, None, &[]);
         assert!(result.is_err());
 
         let pid = fs::read_to_string(&pid_file).unwrap();

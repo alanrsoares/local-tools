@@ -7,6 +7,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct CliOptions {
     pub custom_browser: Option<String>,
+    /// Extra flags handed to the browser binary verbatim.
+    pub browser_args: Vec<String>,
     pub default_timeout_ms: u64,
     pub headless: bool,
     pub quiet: bool,
@@ -35,6 +37,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
     }
 
     let mut custom_browser = None;
+    let mut browser_args: Vec<String> = Vec::new();
     let mut default_timeout_ms = 30_000;
     let mut headless = true;
     let mut quiet = false;
@@ -68,6 +71,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
                     return Err("--browser requires a path".to_string());
                 }
                 custom_browser = Some(args[i].clone());
+            }
+            "--browser-arg" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--browser-arg requires a flag (e.g. --no-sandbox)".to_string());
+                }
+                browser_args.push(args[i].clone());
             }
             "-s" | "--session" => {
                 i += 1;
@@ -139,6 +149,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
 
     Ok(Action::Run(CliOptions {
         custom_browser,
+        browser_args,
         default_timeout_ms,
         headless,
         quiet,
@@ -208,6 +219,9 @@ pub fn print_help() {
         --list-sessions         List stored persistent session profiles
         --clear-session <name>  Delete stored persistent session profile
     -b, --browser <path>        Custom browser binary (Chromium, Chrome, Brave)
+        --browser-arg <flag>    Extra browser flag, repeatable (e.g. --browser-arg --no-sandbox).
+                                Running as root already implies --no-sandbox and
+                                --disable-dev-shm-usage, for CI containers
     -t, --timeout <duration>    Default step timeout (default: 30s)
     -f, --file <path>           Read a script file instead of CLI verbs
         --repl, -               Stream commands from stdin, one per line
@@ -253,6 +267,26 @@ mod tests {
             }
             _ => panic!("expected Run action"),
         }
+    }
+
+    #[test]
+    fn parse_repeated_browser_args() {
+        let args = vec![
+            "--browser-arg".to_string(),
+            "--no-sandbox".to_string(),
+            "--browser-arg".to_string(),
+            "--lang=en-GB".to_string(),
+            "https://example.com".to_string(),
+        ];
+
+        match parse_args(&args).expect("parse failed") {
+            Action::Run(opts) => {
+                assert_eq!(opts.browser_args, vec!["--no-sandbox", "--lang=en-GB"]);
+            }
+            _ => panic!("expected Run action"),
+        }
+
+        assert!(parse_args(&["--browser-arg".to_string()]).is_err());
     }
 
     #[test]

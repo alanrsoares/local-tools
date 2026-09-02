@@ -1,7 +1,8 @@
-//! Browser process management and DevTools endpoint discovery.
+//! Browser process management, persistent sessions, and DevTools discovery.
 
 use crate::cdp::{CdpSession, WebSocketClient};
 use crate::json;
+use local_common::paths::tool_data_dir;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -14,7 +15,8 @@ use std::time::{Duration, Instant};
 
 pub struct BrowserInstance {
     child: Child,
-    temp_dir: PathBuf,
+    user_data_dir: PathBuf,
+    is_persistent: bool,
     session: Option<CdpSession>,
 }
 
@@ -22,19 +24,31 @@ impl BrowserInstance {
     pub fn launch(
         custom_browser: Option<&str>,
         headless: bool,
+        user_data_dir: Option<PathBuf>,
     ) -> Result<(Self, CdpSession), String> {
         let browser_path = find_browser(custom_browser)?;
 
-        let temp_dir = env::temp_dir().join(format!(
-            "local-tools-webdriver-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        fs::create_dir_all(&temp_dir)
-            .map_err(|e| format!("failed to create temp profile dir: {e}"))?;
+        let (data_dir, is_persistent) = match user_data_dir {
+            Some(dir) => {
+                fs::create_dir_all(&dir).map_err(|e| {
+                    format!("failed to create session directory {}: {e}", dir.display())
+                })?;
+                (dir, true)
+            }
+            None => {
+                let temp_dir = env::temp_dir().join(format!(
+                    "local-tools-webdriver-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                fs::create_dir_all(&temp_dir)
+                    .map_err(|e| format!("failed to create temp profile dir: {e}"))?;
+                (temp_dir, false)
+            }
+        };
 
         let mut cmd = Command::new(&browser_path);
 
@@ -48,7 +62,7 @@ impl BrowserInstance {
             .arg("--mute-audio")
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
-            .arg(format!("--user-data-dir={}", temp_dir.display()))
+            .arg(format!("--user-data-dir={}", data_dir.display()))
             .arg("about:blank")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -100,7 +114,8 @@ impl BrowserInstance {
 
         let instance = Self {
             child,
-            temp_dir,
+            user_data_dir: data_dir,
+            is_persistent,
             session: None,
         };
 
@@ -115,8 +130,84 @@ impl Drop for BrowserInstance {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = fs::remove_dir_all(&self.temp_dir);
+        if !self.is_persistent {
+            let _ = fs::remove_dir_all(&self.user_data_dir);
+        }
     }
+}
+
+pub fn resolve_session_path(session_name: &str) -> Result<PathBuf, String> {
+    let sanitized: String = session_name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    if sanitized.is_empty() {
+        return Err("session name cannot be empty".to_string());
+    }
+
+    let base = tool_data_dir("webdriver")
+        .ok_or_else(|| "failed to resolve user data directory".to_string())?;
+
+    Ok(base.join("sessions").join(sanitized))
+}
+
+pub fn list_sessions() -> Result<Vec<(String, u64)>, String> {
+    let base = tool_data_dir("webdriver")
+        .ok_or_else(|| "failed to resolve user data directory".to_string())?;
+    let sessions_dir = base.join("sessions");
+
+    if !sessions_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut list = Vec::new();
+    let entries = fs::read_dir(&sessions_dir)
+        .map_err(|e| format!("failed to read sessions directory: {e}"))?;
+
+    for entry in entries.flatten() {
+        if let Ok(ft) = entry.file_type() {
+            if ft.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let size = dir_size(&entry.path());
+                list.push((name, size));
+            }
+        }
+    }
+
+    list.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(list)
+}
+
+pub fn clear_session(session_name: &str) -> Result<PathBuf, String> {
+    let path = resolve_session_path(session_name)?;
+    if path.exists() {
+        fs::remove_dir_all(&path)
+            .map_err(|e| format!("failed to remove session directory {}: {e}", path.display()))?;
+    }
+    Ok(path)
+}
+
+fn dir_size(path: &Path) -> u64 {
+    let mut total = 0;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_dir() {
+                    total += dir_size(&entry.path());
+                } else {
+                    total += meta.len();
+                }
+            }
+        }
+    }
+    total
 }
 
 fn http_request(port: u16, method: &str, path: &str) -> Result<String, String> {

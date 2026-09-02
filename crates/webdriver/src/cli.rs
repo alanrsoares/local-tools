@@ -1,8 +1,9 @@
-//! Command-line argument parsing and help definitions.
+//! Command-line argument parsing, persistent sessions, and help definitions.
 
 use crate::dsl::{self, Step};
 use std::fs;
 use std::io::{self, Read};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct CliOptions {
@@ -11,11 +12,15 @@ pub struct CliOptions {
     pub headless: bool,
     pub quiet: bool,
     pub verbose: bool,
+    pub session_name: Option<String>,
+    pub user_data_dir: Option<PathBuf>,
     pub steps: Vec<Step>,
 }
 
 pub enum Action {
     Run(CliOptions),
+    ListSessions,
+    ClearSession(String),
     Help,
     Version,
 }
@@ -30,6 +35,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
     let mut headless = true;
     let mut quiet = false;
     let mut verbose = false;
+    let mut session_name = None;
+    let mut user_data_dir = None;
     let mut script_file = None;
     let mut read_stdin = false;
 
@@ -42,12 +49,34 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
         match arg.as_str() {
             "-h" | "--help" | "help" => return Ok(Action::Help),
             "-V" | "--version" | "version" => return Ok(Action::Version),
+            "--list-sessions" | "sessions" => return Ok(Action::ListSessions),
+            "--clear-session" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--clear-session requires a session name".to_string());
+                }
+                return Ok(Action::ClearSession(args[i].clone()));
+            }
             "-b" | "--browser" => {
                 i += 1;
                 if i >= args.len() {
                     return Err("--browser requires a path".to_string());
                 }
                 custom_browser = Some(args[i].clone());
+            }
+            "-s" | "--session" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--session requires a session name (e.g. 'my-app')".to_string());
+                }
+                session_name = Some(args[i].clone());
+            }
+            "--user-data-dir" | "--profile" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("--user-data-dir requires a directory path".to_string());
+                }
+                user_data_dir = Some(PathBuf::from(&args[i]));
             }
             "-t" | "--timeout" => {
                 i += 1;
@@ -113,24 +142,31 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
         headless,
         quiet,
         verbose,
+        session_name,
+        user_data_dir,
         steps,
     }))
 }
 
 pub fn print_help() {
     println!(
-        "\x1b[1;36mwebdriver\x1b[0m — fast, zero-dependency browser automation & screenshot CLI
+        "\x1b[1;36mwebdriver\x1b[0m — fast, zero-dependency browser automation & persistent session CLI
 
 \x1b[1mUSAGE:\x1b[0m
     webdriver [OPTIONS] <URL> [VERBS...]
+    webdriver --session <NAME> <URL> [VERBS...]
     webdriver [OPTIONS] - < script.wd
 
-\x1b[1mEXAMPLES:\x1b[0m
-    webdriver http://localhost:3000 wait-for '.my-css-selector' --timeout 60s --screenshot
-    webdriver https://example.com viewport 1440 900 screenshot out.png --full-page
-    webdriver https://app.dev click \"#login\" type \"#user\" \"admin\" wait 1s screenshot
-    webdriver https://example.com pdf report.pdf
-    webdriver https://example.com html > page.html
+\x1b[1mPERSISTENT AUTH & SESSIONS:\x1b[0m
+    # Hop 1: Authenticate and store cookies/localStorage in 'my-app' session profile
+    webdriver --session my-app http://localhost:3000/login fill '#user' 'admin' fill '#pass' 'sec' click '#submit' wait-for '.dashboard'
+
+    # Hop 2: Subsequent request reuses authenticated session profile seamlessly
+    webdriver --session my-app http://localhost:3000/admin/settings screenshot settings.png
+
+    # Manage saved sessions
+    webdriver --list-sessions
+    webdriver --clear-session my-app
 
 \x1b[1mVERBS & ACTIONS:\x1b[0m
     \x1b[1;33mgoto\x1b[0m <url>                     Navigate to URL (default for initial URL)
@@ -146,6 +182,10 @@ pub fn print_help() {
     \x1b[1;33mhtml\x1b[0m [path]                    Dump current HTML to file or stdout
 
 \x1b[1mOPTIONS:\x1b[0m
+    -s, --session <name>        Persistent session profile name (preserves cookies & storage)
+        --user-data-dir <dir>   Custom browser profile data directory
+        --list-sessions         List stored persistent session profiles
+        --clear-session <name>  Delete stored persistent session profile
     -b, --browser <path>        Custom browser binary (Chromium, Chrome, Brave)
     -t, --timeout <duration>    Default step timeout (default: 30s)
         --headed                Show browser UI window (disable headless mode)
@@ -167,6 +207,8 @@ mod tests {
     #[test]
     fn parse_cli_full_flow() {
         let args = vec![
+            "-s".to_string(),
+            "auth-test".to_string(),
             "-t".to_string(),
             "45s".to_string(),
             "-q".to_string(),
@@ -180,6 +222,7 @@ mod tests {
         let action = parse_args(&args).expect("parse failed");
         match action {
             Action::Run(opts) => {
+                assert_eq!(opts.session_name, Some("auth-test".to_string()));
                 assert_eq!(opts.default_timeout_ms, 45_000);
                 assert!(opts.quiet);
                 assert_eq!(opts.steps.len(), 3);
@@ -199,6 +242,18 @@ mod tests {
             Ok(Action::Version)
         ));
         assert!(matches!(parse_args(&[]), Ok(Action::Help)));
+    }
+
+    #[test]
+    fn parse_session_actions() {
+        assert!(matches!(
+            parse_args(&["--list-sessions".to_string()]),
+            Ok(Action::ListSessions)
+        ));
+        assert!(matches!(
+            parse_args(&["--clear-session".to_string(), "app".to_string()]),
+            Ok(Action::ClearSession(ref s)) if s == "app"
+        ));
     }
 
     #[test]

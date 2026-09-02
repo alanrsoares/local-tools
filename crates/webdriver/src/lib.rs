@@ -1,4 +1,4 @@
-//! Fast, zero-dependency browser automation library and CLI engine.
+//! Fast, zero-dependency browser automation library, persistent sessions, and CLI engine.
 
 pub mod base64;
 pub mod browser;
@@ -16,6 +16,8 @@ use std::io::Write;
 use std::time::Instant;
 
 pub fn run(args: &[String], out: &mut impl Write) -> Result<i32, String> {
+    let c = Colour::new(true);
+
     match cli::parse_args(args)? {
         Action::Help => {
             cli::print_help();
@@ -23,6 +25,38 @@ pub fn run(args: &[String], out: &mut impl Write) -> Result<i32, String> {
         }
         Action::Version => {
             cli::print_version();
+            Ok(0)
+        }
+        Action::ListSessions => {
+            let sessions = browser::list_sessions()?;
+            if sessions.is_empty() {
+                let _ = writeln!(out, "No persistent sessions found.");
+            } else {
+                let _ = writeln!(out, "{}", c.bold("Saved Persistent Sessions:"));
+                for (name, size) in sessions {
+                    let size_str = format_size(size);
+                    let _ = writeln!(
+                        out,
+                        "  • {} {} {}({}){}",
+                        c.cyan(&name),
+                        c.gray("—"),
+                        c.gray(""),
+                        size_str,
+                        c.gray("")
+                    );
+                }
+            }
+            Ok(0)
+        }
+        Action::ClearSession(name) => {
+            let path = browser::clear_session(&name)?;
+            let _ = writeln!(
+                out,
+                "{} Cleared session '{}' ({})",
+                c.green("✓"),
+                c.bold(&name),
+                path.display()
+            );
             Ok(0)
         }
         Action::Run(opts) => execute(&opts, out).map(|_| 0),
@@ -33,12 +67,29 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<(), String> {
     let c = Colour::new(true);
     let overall_start = Instant::now();
 
+    let target_dir = if let Some(ref dir) = opts.user_data_dir {
+        Some(dir.clone())
+    } else if let Some(ref name) = opts.session_name {
+        Some(browser::resolve_session_path(name)?)
+    } else {
+        None
+    };
+
     if !opts.quiet {
+        let session_info = if let Some(ref name) = opts.session_name {
+            format!(" [session: {}]", c.cyan(name))
+        } else if opts.user_data_dir.is_some() {
+            " [custom-profile]".to_string()
+        } else {
+            " [ephemeral]".to_string()
+        };
+
         let _ = writeln!(
             out,
             "{}",
             c.cyan(format!(
-                "⚡ Launching browser ({} step{})...",
+                "⚡ Launching browser{} ({} step{})...",
+                session_info,
                 opts.steps.len(),
                 if opts.steps.len() == 1 { "" } else { "s" }
             ))
@@ -46,7 +97,7 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<(), String> {
     }
 
     let (_instance, mut session) =
-        BrowserInstance::launch(opts.custom_browser.as_deref(), opts.headless)?;
+        BrowserInstance::launch(opts.custom_browser.as_deref(), opts.headless, target_dir)?;
 
     for (idx, step) in opts.steps.iter().enumerate() {
         let step_start = Instant::now();
@@ -323,4 +374,20 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.0} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }

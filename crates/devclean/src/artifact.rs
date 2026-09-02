@@ -28,7 +28,9 @@ impl ArtifactType {
     /// Identify artifact type from directory name and optional parent inspection.
     pub fn detect(dir_name: &str, parent: &Path) -> Option<Self> {
         match dir_name {
-            "target" => Some(ArtifactType::Rust),
+            // `target` is generic enough to be a user's own directory. Only
+            // classify it as Rust output when its project root has a manifest.
+            "target" if parent.join("Cargo.toml").is_file() => Some(ArtifactType::Rust),
             "node_modules" | ".next" | ".nuxt" | ".turbo" | ".svelte-kit" | ".astro" | ".vite"
             | ".parcel-cache" | "coverage" | ".nyc_output" => Some(ArtifactType::Node),
             ".venv" | "venv" | "__pycache__" | ".pytest_cache" | ".ruff_cache" | ".mypy_cache"
@@ -130,5 +132,22 @@ mod tests {
         assert_eq!(ArtifactType::parse("py"), Some(ArtifactType::Python));
         assert_eq!(ArtifactType::parse("net"), Some(ArtifactType::DotNet));
         assert_eq!(ArtifactType::parse("unknown"), None);
+    }
+
+    #[test]
+    fn target_requires_a_cargo_manifest() {
+        let tmp = std::env::temp_dir().join("devclean-target-detection-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        assert_eq!(ArtifactType::detect("target", &tmp), None);
+
+        std::fs::write(tmp.join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
+        assert_eq!(
+            ArtifactType::detect("target", &tmp),
+            Some(ArtifactType::Rust)
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

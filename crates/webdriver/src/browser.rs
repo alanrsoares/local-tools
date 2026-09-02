@@ -74,52 +74,64 @@ impl BrowserInstance {
             )
         })?;
 
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or("failed to capture browser stderr")?;
-        let (tx, rx) = mpsc::channel();
+        let setup = (|| -> Result<CdpSession, String> {
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or("failed to capture browser stderr")?;
+            let (tx, rx) = mpsc::channel();
 
-        // Read stderr in background to capture DevTools listening port
-        thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
-                if let Some(pos) = line.find("DevTools listening on ws://") {
-                    let rest = &line[pos + "DevTools listening on ws://".len()..];
-                    let _ = tx.send(rest.to_string());
-                    break;
+            // Read stderr in background to capture DevTools listening port.
+            thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    if let Some(pos) = line.find("DevTools listening on ws://") {
+                        let rest = &line[pos + "DevTools listening on ws://".len()..];
+                        let _ = tx.send(rest.to_string());
+                        break;
+                    }
                 }
+            });
+
+            let ws_endpoint = rx
+                .recv_timeout(Duration::from_secs(15))
+                .map_err(|_| "timed out waiting for browser DevTools endpoint".to_string())?;
+
+            // Format is e.g. "127.0.0.1:54321/devtools/browser/uuid"
+            let parts: Vec<&str> = ws_endpoint.splitn(2, '/').collect();
+            let addr = parts[0];
+            let port: u16 = addr
+                .split(':')
+                .nth(1)
+                .and_then(|p| p.parse().ok())
+                .ok_or_else(|| format!("invalid DevTools address '{addr}'"))?;
+
+            let page_ws_path = create_new_tab(port)?;
+            let ws_client = WebSocketClient::connect("127.0.0.1", port, &page_ws_path)?;
+            let mut session = CdpSession::new(ws_client);
+            session.enable_domains()?;
+            Ok(session)
+        })();
+
+        match setup {
+            Ok(session) => Ok((
+                Self {
+                    child,
+                    user_data_dir: data_dir,
+                    is_persistent,
+                    session: None,
+                },
+                session,
+            )),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if !is_persistent {
+                    let _ = fs::remove_dir_all(&data_dir);
+                }
+                Err(error)
             }
-        });
-
-        let ws_endpoint = rx
-            .recv_timeout(Duration::from_secs(15))
-            .map_err(|_| "timed out waiting for browser DevTools endpoint".to_string())?;
-
-        // Format is e.g. "127.0.0.1:54321/devtools/browser/uuid"
-        let parts: Vec<&str> = ws_endpoint.splitn(2, '/').collect();
-        let addr = parts[0];
-        let port: u16 = addr
-            .split(':')
-            .nth(1)
-            .and_then(|p| p.parse().ok())
-            .ok_or_else(|| format!("invalid DevTools address '{addr}'"))?;
-
-        // Create fresh page target via HTTP PUT /json/new or /json/list
-        let page_ws_path = create_new_tab(port)?;
-
-        let ws_client = WebSocketClient::connect("127.0.0.1", port, &page_ws_path)?;
-        let mut session = CdpSession::new(ws_client);
-        session.enable_domains()?;
-
-        let instance = Self {
-            child,
-            user_data_dir: data_dir,
-            is_persistent,
-            session: None,
-        };
-
-        Ok((instance, session))
+        }
     }
 }
 
@@ -356,4 +368,42 @@ pub fn find_browser(custom: Option<&str>) -> Result<PathBuf, String> {
         "no Chromium-based browser found. Install Chromium, Google Chrome, or Brave, or set CHROME_BIN."
             .to_string(),
     )
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn launch_failure_reaps_the_browser_process() {
+        let tmp =
+            std::env::temp_dir().join(format!("webdriver-launch-cleanup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let pid_file = tmp.join("browser.pid");
+        let browser = tmp.join("fake-browser");
+        fs::write(
+            &browser,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\necho 'DevTools listening on ws://invalid' >&2\nsleep 30\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&browser, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = BrowserInstance::launch(Some(browser.to_str().unwrap()), true, None);
+        assert!(result.is_err());
+
+        let pid = fs::read_to_string(&pid_file).unwrap();
+        let status = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .status()
+            .unwrap();
+        assert!(!status.success(), "failed launch left its browser running");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }

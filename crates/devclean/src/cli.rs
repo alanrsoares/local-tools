@@ -62,7 +62,7 @@ OPTIONS
     -t, --target <TYPES>  comma-separated target ecosystems: rust, node, python, dotnet
     -p, --path <DIR>      root path to scan (default: current directory)
         --min-size <MB>   ignore artifact directories smaller than MB megabytes
-        --older-than <N>  only clean artifacts unaccessed for N days
+        --older-than <N>  only clean artifacts not modified for N days
         --color           force colour output
         --no-color        disable colour output
     -h, --help            print this help

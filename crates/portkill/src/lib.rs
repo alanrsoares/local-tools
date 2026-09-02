@@ -94,6 +94,7 @@ fn run_kill(p: &Parsed, c: &Colour, out: &mut impl Write) -> i32 {
         "SIGTERM (-15)"
     };
 
+    let mut had_failures = false;
     for sock in matched {
         if !killed_pids.insert(sock.pid) {
             continue;
@@ -123,6 +124,7 @@ fn run_kill(p: &Parsed, c: &Colour, out: &mut impl Write) -> i32 {
                     );
                 }
                 Err(e) => {
+                    had_failures = true;
                     let _ = writeln!(
                         out,
                         "{} failed to kill {} (PID {}): {e}",
@@ -135,7 +137,15 @@ fn run_kill(p: &Parsed, c: &Colour, out: &mut impl Write) -> i32 {
         }
     }
 
-    0
+    kill_exit_code(had_failures)
+}
+
+fn kill_exit_code(had_failures: bool) -> i32 {
+    if had_failures {
+        1
+    } else {
+        0
+    }
 }
 
 /// Filter socket list by requested ports and/or process names.
@@ -218,5 +228,11 @@ mod tests {
         let matched_py = filter_sockets(&sample, &[], &["python".to_string()]);
         assert_eq!(matched_py.len(), 1);
         assert_eq!(matched_py[0].port, 8000);
+    }
+
+    #[test]
+    fn kill_exit_code_reflects_signal_failures() {
+        assert_eq!(kill_exit_code(false), 0);
+        assert_eq!(kill_exit_code(true), 1);
     }
 }

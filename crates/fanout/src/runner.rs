@@ -241,6 +241,7 @@ pub fn execute_tasks(
 
     loop {
         let mut state_changed = false;
+        let mut has_output = false;
 
         while let Ok(event) = rx.try_recv() {
             match event {
@@ -254,6 +255,12 @@ pub fn execute_tasks(
                     text,
                     is_stderr,
                 } => {
+                    if interactive && painted_lines > 0 {
+                        clear_pinned(&mut out, painted_lines);
+                        painted_lines = 0;
+                    }
+                    has_output = true;
+
                     let spec = &tasks[index];
                     let prefix = format!(
                         "{}{}{}{} {}{}",
@@ -278,6 +285,12 @@ pub fn execute_tasks(
                     exit_code,
                     tail_lines,
                 } => {
+                    if interactive && painted_lines > 0 {
+                        clear_pinned(&mut out, painted_lines);
+                        painted_lines = 0;
+                    }
+                    has_output = true;
+
                     states[index].phase = outcome;
                     states[index].duration = Some(duration);
                     state_changed = true;
@@ -333,7 +346,7 @@ pub fn execute_tasks(
             state_changed = true;
         }
 
-        if interactive && state_changed {
+        if interactive && (state_changed || has_output || painted_lines == 0) {
             clear_pinned(&mut out, painted_lines);
             painted_lines = paint_status_block(
                 &mut out, &tasks, &states, frame, start_time, gutter, &styles,

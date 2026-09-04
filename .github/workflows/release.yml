@@ -1,0 +1,83 @@
+name: Release
+
+# Cut a release by pushing a tag:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Each runner builds every CLI natively (no cross-compilation) and uploads one
+# tarball holding all of them, plus a SHA256 sidecar. install.sh consumes those
+# assets by name, so keep the `local-tools-<os>-<arch>.tar.gz` shape stable.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TOOLS: "scaffold portkill jwt devclean fanout webdriver"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: macos-arm64 }
+          - { os: macos-13, target: macos-x64 }
+          - { os: ubuntu-latest, target: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: cargo build --workspace --release --locked
+
+      - name: Package
+        run: |
+          set -eu
+          stage="$(mktemp -d)"
+          for tool in $TOOLS; do
+            cp "target/release/$tool" "$stage/$tool"
+          done
+          name="local-tools-${{ matrix.target }}.tar.gz"
+          tar -czf "$name" -C "$stage" .
+          shasum -a 256 "$name" > "$name.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            local-tools-*.tar.gz
+            local-tools-*.tar.gz.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          # Re-runs land on an existing release; overwrite its assets instead.
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --generate-notes \
+            dist/* \
+          || gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*

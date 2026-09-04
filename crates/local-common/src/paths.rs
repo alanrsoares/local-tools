@@ -9,22 +9,22 @@
 //! the rest of this machine's dotfiles are laid out (`~/.config/zsh`,
 //! `~/.config/starship`, `~/.config/mise`, …). On Linux this is already the
 //! native convention. Each tool then gets a predictable
-//! `~/.config/local-tools/<tool>/` home.
+//! `~/.config/belt/<tool>/` home.
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Parent directory holding one subdirectory per tool:
-/// `~/.config/local-tools/<tool>`.
-pub const TOOL_ROOT: &str = "local-tools";
+/// `~/.config/belt/<tool>`.
+pub const TOOL_ROOT: &str = "belt";
 
 /// Resolve the user's home directory from `$HOME` (the reliable POSIX source).
 pub fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
 }
 
-/// XDG config dir for `tool`, e.g. `~/.config/local-tools/<tool>`.
+/// XDG config dir for `tool`, e.g. `~/.config/belt/<tool>`.
 ///
 /// Honours `XDG_CONFIG_HOME` when set; otherwise falls back to the home-rooted
 /// location. Returns `None` only when `$HOME` is unavailable.
@@ -35,7 +35,7 @@ pub fn tool_config_dir(tool: &str) -> Option<PathBuf> {
     home_dir().map(|h| join_under(&h, ".config", tool))
 }
 
-/// XDG data dir for `tool`, e.g. `~/.local/share/local-tools/<tool>`.
+/// XDG data dir for `tool`, e.g. `~/.local/share/belt/<tool>`.
 pub fn tool_data_dir(tool: &str) -> Option<PathBuf> {
     if let Some(base) = env::var_os("XDG_DATA_HOME") {
         return Some(PathBuf::from(base).join(TOOL_ROOT).join(tool));
@@ -64,11 +64,11 @@ mod tests {
         let root = PathBuf::from("/Users/alana");
         assert_eq!(
             join_under(&root, ".config", "scaffold"),
-            PathBuf::from("/Users/alana/.config/local-tools/scaffold")
+            PathBuf::from("/Users/alana/.config/belt/scaffold")
         );
         assert_eq!(
             join_under(&root, ".local/share", "scaffold"),
-            PathBuf::from("/Users/alana/.local/share/local-tools/scaffold")
+            PathBuf::from("/Users/alana/.local/share/belt/scaffold")
         );
     }
 

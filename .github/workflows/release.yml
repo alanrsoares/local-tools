@@ -6,7 +6,7 @@ name: Release
 #
 # Each runner builds every CLI natively (no cross-compilation) and uploads one
 # tarball holding all of them, plus a SHA256 sidecar. install.sh consumes those
-# assets by name, so keep the `local-tools-<os>-<arch>.tar.gz` shape stable.
+# assets by name, so keep the `belt-<os>-<arch>.tar.gz` shape stable.
 on:
   push:
     tags: ["v*"]
@@ -49,7 +49,7 @@ jobs:
           for tool in $TOOLS; do
             cp "target/release/$tool" "$stage/$tool"
           done
-          name="local-tools-${{ matrix.target }}.tar.gz"
+          name="belt-${{ matrix.target }}.tar.gz"
           tar -czf "$name" -C "$stage" .
           shasum -a 256 "$name" > "$name.sha256"
 
@@ -57,8 +57,8 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: |
-            local-tools-*.tar.gz
-            local-tools-*.tar.gz.sha256
+            belt-*.tar.gz
+            belt-*.tar.gz.sha256
 
   release:
     needs: build

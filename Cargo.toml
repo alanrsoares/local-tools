@@ -1,5 +1,5 @@
 # ==============================================================================
-#  local-tools — workspace manifest
+#  belt — workspace manifest
 #
 #  Fast, single-purpose Rust binaries that automate day-to-day developer
 #  workflows. Primary target is macOS Apple Silicon, but the workspace is
@@ -37,7 +37,7 @@ edition = "2021"
 authors = ["Alan R. Soares"]
 license = "MIT"
 publish = false
-repository = "https://github.com/alanrsoares/local-tools"
+repository = "https://github.com/alanrsoares/belt"
 
 # Dependencies shared across tools. A crate opts in with:
 #   [dependencies]

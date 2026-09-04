@@ -3,7 +3,7 @@
 //!
 //!    1735699200   ts   web   /Users/alana/dev/web
 //!
-//! The log lives under the tool's config dir (`~/.config/local-tools/scaffold`)
+//! The log lives under the tool's config dir (`~/.config/belt/scaffold`)
 //! and is *best-effort*: a logging failure must never fail a scaffold.
 
 use std::fs;

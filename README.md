@@ -1,4 +1,4 @@
-# local-tools
+# belt
 
 Fast, single-purpose Rust binaries that automate **Alan's** day-to-day
 developer workflows. Primary target is Alan's machine (macOS Apple Silicon);
@@ -16,19 +16,19 @@ tagged release:
 
 ```sh
 # everything into ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/alanrsoares/local-tools/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/alanrsoares/belt/main/install.sh | sh
 
 # or just the tools you want
-curl -fsSL https://raw.githubusercontent.com/alanrsoares/local-tools/main/install.sh | sh -s -- webdriver jwt
+curl -fsSL https://raw.githubusercontent.com/alanrsoares/belt/main/install.sh | sh -s -- webdriver jwt
 ```
 
-`LOCAL_TOOLS_BIN_DIR` overrides the destination, `LOCAL_TOOLS_VERSION` pins a
+`BELT_BIN_DIR` overrides the destination, `BELT_VERSION` pins a
 tag, and `GITHUB_TOKEN` lifts the anonymous GitHub API rate limit.
 
 From source instead:
 
 ```sh
-cargo install --git https://github.com/alanrsoares/local-tools webdriver
+cargo install --git https://github.com/alanrsoares/belt webdriver
 just install-all   # from a clone
 ```
 
@@ -38,7 +38,7 @@ Not published to crates.io — most of the tool names are already taken there.
 ## Layout
 
 ```
-local-tools/
+belt/
 ├── Cargo.toml              # workspace manifest (members, lint policy, shared deps)
 ├── crates/
 │    ├── local-common/       # shared plumbing (paths, terminal helpers, …)
@@ -64,8 +64,8 @@ local-tools/
   `[lints] workspace = true`.
 * **Zero external dependencies** (std only across crates). Builds and tests fully offline
   with instant compilation speed.
-* **Per-tool homes are predictable**: `~/.config/local-tools/<tool>/` for
-  config, `~/.local/share/local-tools/<tool>/` for data — XDG-style on purpose
+* **Per-tool homes are predictable**: `~/.config/belt/<tool>/` for
+  config, `~/.local/share/belt/<tool>/` for data — XDG-style on purpose
   to match the rest of this machine's `~/.config/` dotfiles.
 * **`Cargo.lock` is committed** — this is a binary-producing workspace.
 

@@ -41,10 +41,7 @@ pub struct Parsed {
     pub no_install: bool,
     /// Skip recording the scaffold in the recent log (`--no-log`).
     pub no_log: bool,
-    /// Force colour even when output is redirected (`--color`).
-    pub color: bool,
-    /// Disable colour (`--no-color`).
-    pub no_color: bool,
+    pub flags: CommonFlags,
 }
 
 impl Default for Parsed {
@@ -58,8 +55,7 @@ impl Default for Parsed {
             dry_run: false,
             no_install: false,
             no_log: false,
-            color: false,
-            no_color: false,
+            flags: CommonFlags::default(),
         }
     }
 }
@@ -87,7 +83,7 @@ OPTIONS
          --force          overwrite an existing, non-empty target dir
          --dry-run        show the files that would be written, write nothing
          --no-install     skip the post-scaffold install step (info only in v1)
-         --no-log         do not record the scaffold in ~/.config/local-tools
+         --no-log         do not record the scaffold in ~/.config/belt
          --color          force colour even when output is redirected
          --no-color       disable colour
 
@@ -97,27 +93,29 @@ COMMANDS
     -V, --version         print the version string
 "#;
 
+use local_common::{split_flag, ArgCursor, CommonFlags};
+
 /// Parse `args` into [`Parsed`].
 ///
 /// Returns `Ok` with the parsed state, or `Err` with a short, user-facing
 /// message suitable for printing to stderr.
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> {
-    let mut it = args.into_iter();
+    let mut cursor = ArgCursor::new(args.into_iter());
     let mut p = Parsed::default();
 
-    while let Some(a) = it.next() {
-        match a.as_str() {
+    while let Some(a) = cursor.next() {
+        let (flag, inline) = split_flag(&a);
+        match flag {
             "-h" | "--help" => p.action = Action::Help,
             "-V" | "--version" => p.action = Action::Version,
             "-L" | "--list" => p.action = Action::List,
-            "-n" | "--name" => p.name = Some(require_next(&mut it, "--name")?),
-            "-p" | "--path" => p.path = PathBuf::from(require_next(&mut it, "--path")?),
+            "-n" | "--name" => p.name = Some(cursor.require_value("--name", inline)?),
+            "-p" | "--path" => p.path = PathBuf::from(cursor.require_value("--path", inline)?),
             "--force" | "-f" => p.force = true,
             "--dry-run" => p.dry_run = true,
             "--no-install" => p.no_install = true,
             "--no-log" => p.no_log = true,
-            "--no-color" => p.no_color = true,
-            "--color" => p.color = true,
+            f if p.flags.check_arg(f) => {}
             s => {
                 if s.starts_with('-') {
                     return Err(format!("unknown flag: {a}"));
@@ -136,12 +134,6 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
         return Err("missing <LANG>: try ts, rust, go, py — or run `scaffold --list`".into());
     }
     Ok(p)
-}
-
-/// Pull and return the next argument as the value of `flag`, erroring with a
-/// friendly message if it is missing.
-fn require_next<I: Iterator<Item = String>>(it: &mut I, flag: &str) -> Result<String, String> {
-    it.next().ok_or_else(|| format!("{flag} requires a value"))
 }
 
 #[cfg(test)]
@@ -188,7 +180,7 @@ mod tests {
         assert!(p.force);
         assert!(p.dry_run);
         assert!(p.no_log);
-        assert!(p.color);
+        assert!(p.flags.color);
     }
 
     #[test]

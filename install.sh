@@ -1,22 +1,22 @@
 #!/bin/sh
-# local-tools installer — fetches prebuilt CLIs from GitHub release assets.
+# belt installer — fetches prebuilt CLIs from GitHub release assets.
 #
-#   curl -fsSL https://raw.githubusercontent.com/alanrsoares/local-tools/main/install.sh | sh
-#   wget -qO-  https://raw.githubusercontent.com/alanrsoares/local-tools/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/alanrsoares/belt/main/install.sh | sh
+#   wget -qO-  https://raw.githubusercontent.com/alanrsoares/belt/main/install.sh | sh
 #
 # Install a subset by passing tool names (needs `| sh -s --` when piped):
 #   curl -fsSL .../install.sh | sh -s -- webdriver jwt
 #
 # Options (env vars):
 #   GITHUB_TOKEN / GH_TOKEN   auth to lift anonymous GitHub API rate limits
-#   LOCAL_TOOLS_VERSION       install a specific tag (e.g. v0.1.0); default: latest
-#   LOCAL_TOOLS_BIN_DIR       install destination (default ~/.local/bin)
-#   LOCAL_TOOLS_API_URL       override the release endpoint (testing/mirrors)
+#   BELT_VERSION              install a specific tag (e.g. v0.1.0); default: latest
+#   BELT_BIN_DIR              install destination (default ~/.local/bin)
+#   BELT_API_URL              override the release endpoint (testing/mirrors)
 set -eu
 
-REPO="alanrsoares/local-tools"
+REPO="alanrsoares/belt"
 ALL_TOOLS="scaffold portkill jwt devclean fanout webdriver"
-BIN_DIR="${LOCAL_TOOLS_BIN_DIR:-$HOME/.local/bin}"
+BIN_DIR="${BELT_BIN_DIR:-$HOME/.local/bin}"
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 
 say() { printf '%s\n' "$*"; }
@@ -82,7 +82,7 @@ fetch_to() {
 case "$(uname -s)" in
   Darwin) OS="macos" ;;
   Linux) OS="linux" ;;
-  *) fail "unsupported OS: $(uname -s) (local-tools ships macOS and Linux builds)" ;;
+  *) fail "unsupported OS: $(uname -s) (belt ships macOS and Linux builds)" ;;
 esac
 
 case "$(uname -m)" in
@@ -91,20 +91,20 @@ case "$(uname -m)" in
   *) fail "unsupported architecture: $(uname -m)" ;;
 esac
 
-ASSET="local-tools-${OS}-${ARCH}.tar.gz"
+ASSET="belt-${OS}-${ARCH}.tar.gz"
 
 # --- release lookup ----------------------------------------------------------
-# LOCAL_TOOLS_API_URL overrides the release endpoint (testing/mirrors).
-if [ -n "${LOCAL_TOOLS_API_URL:-}" ]; then
-  API_URL="$LOCAL_TOOLS_API_URL"
-elif [ -n "${LOCAL_TOOLS_VERSION:-}" ]; then
-  API_URL="https://api.github.com/repos/${REPO}/releases/tags/${LOCAL_TOOLS_VERSION}"
+# BELT_API_URL overrides the release endpoint (testing/mirrors).
+if [ -n "${BELT_API_URL:-}" ]; then
+  API_URL="$BELT_API_URL"
+elif [ -n "${BELT_VERSION:-}" ]; then
+  API_URL="https://api.github.com/repos/${REPO}/releases/tags/${BELT_VERSION}"
 else
   API_URL="https://api.github.com/repos/${REPO}/releases/latest"
 fi
 
 say "» platform: ${OS}-${ARCH}"
-say "» looking up release (${LOCAL_TOOLS_VERSION:-latest})…"
+say "» looking up release (${BELT_VERSION:-latest})…"
 RELEASE_JSON=$(fetch "$API_URL") ||
   fail "no release found. If you hit the anonymous GitHub API rate limit, pass a token:
        GITHUB_TOKEN=\$(gh auth token) sh install.sh
@@ -141,7 +141,7 @@ TARBALL_REF=$(pick_asset "$ASSET")
 [ -n "$TARBALL_REF" ] || fail "this release has no ${OS}-${ARCH} build ($ASSET).
        CI builds macos-arm64, macos-x64, linux-x64 and linux-arm64."
 
-TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/local-tools-install.XXXXXX")
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/belt-install.XXXXXX")
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 
 say "» downloading ${ASSET}…"

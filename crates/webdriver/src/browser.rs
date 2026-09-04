@@ -37,7 +37,7 @@ impl BrowserInstance {
             }
             None => {
                 let temp_dir = env::temp_dir().join(format!(
-                    "local-tools-webdriver-{}-{}",
+                    "belt-webdriver-{}-{}",
                     std::process::id(),
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

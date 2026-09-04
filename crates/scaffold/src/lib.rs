@@ -13,7 +13,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use local_common::{color_enabled_for, tool_config_dir, Colour};
+use local_common::{tool_config_dir, Colour};
 
 use crate::templates::{File, Lang};
 use cli::{Action, Parsed};
@@ -31,15 +31,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> i32 {
     };
 
     let mut out = std::io::stdout();
-    // Colour on unless explicitly forced off, OR unless the user forced it on
-    // with `--color`.
-    let c = Colour::new(if p.color {
-        true
-    } else if p.no_color {
-        false
-    } else {
-        color_enabled_for(&out, false)
-    });
+    let c = p.flags.resolve_colour(&out);
 
     match p.action {
         Action::Version => {

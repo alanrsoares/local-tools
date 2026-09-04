@@ -7,7 +7,7 @@ mod token;
 
 use std::io::{self, Read, Write};
 
-use local_common::{color_enabled_for, Colour};
+use local_common::{is_terminal, Colour};
 
 use cli::{Action, Parsed};
 pub use token::{now_epoch_secs, JwtToken, TokenStatus};
@@ -24,13 +24,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> i32 {
     };
 
     let mut out = io::stdout();
-    let c = Colour::new(if p.color {
-        true
-    } else if p.no_color {
-        false
-    } else {
-        color_enabled_for(&out, false)
-    });
+    let c = p.flags.resolve_colour(&out);
 
     match p.action {
         Action::Help => {
@@ -111,7 +105,7 @@ fn run_inspect(p: &Parsed, c: &Colour, out: &mut impl Write) -> i32 {
     0
 }
 
-/// Resolve token string from CLI argument or standard input.
+/// Resolve token string from CLI argument or piped standard input.
 fn resolve_token(token_opt: Option<String>) -> Result<String, String> {
     if let Some(t) = token_opt {
         let trimmed = t.trim().to_string();
@@ -120,12 +114,15 @@ fn resolve_token(token_opt: Option<String>) -> Result<String, String> {
         }
     }
 
-    // Attempt to read from stdin
-    let mut stdin_buf = String::new();
-    if io::stdin().read_to_string(&mut stdin_buf).is_ok() {
-        let trimmed = stdin_buf.trim().to_string();
-        if !trimmed.is_empty() {
-            return Ok(trimmed);
+    let stdin = io::stdin();
+    // Only attempt reading stdin if it is piped or redirected (not an interactive TTY).
+    if !is_terminal(&stdin) {
+        let mut stdin_buf = String::new();
+        if stdin.lock().read_to_string(&mut stdin_buf).is_ok() {
+            let trimmed = stdin_buf.trim().to_string();
+            if !trimmed.is_empty() {
+                return Ok(trimmed);
+            }
         }
     }
 

@@ -31,10 +31,14 @@ pub enum Action {
     Version,
 }
 
+use local_common::{split_flag, ArgCursor};
+
 pub fn parse_args(args: &[String]) -> Result<Action, String> {
-    if args.is_empty() {
-        return Ok(Action::Help);
-    }
+    parse(args.to_vec())
+}
+
+pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Action, String> {
+    let mut cursor = ArgCursor::new(args.into_iter());
 
     let mut custom_browser = None;
     let mut browser_args: Vec<String> = Vec::new();
@@ -49,56 +53,51 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
     let mut keep_going = false;
 
     let mut step_tokens = Vec::new();
-    let mut i = 0;
+    let mut has_args = false;
 
-    while i < args.len() {
-        let arg = &args[i];
+    while let Some(arg) = cursor.next() {
+        has_args = true;
+        let (flag, inline) = split_flag(&arg);
 
-        match arg.as_str() {
+        match flag {
             "-h" | "--help" | "help" => return Ok(Action::Help),
             "-V" | "--version" | "version" => return Ok(Action::Version),
             "--list-sessions" | "sessions" => return Ok(Action::ListSessions),
             "--clear-session" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err("--clear-session requires a session name".to_string());
-                }
-                return Ok(Action::ClearSession(args[i].clone()));
+                let name = cursor
+                    .require_value("--clear-session", inline)
+                    .map_err(|_| "--clear-session requires a session name".to_string())?;
+                return Ok(Action::ClearSession(name));
             }
             "-b" | "--browser" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err("--browser requires a path".to_string());
-                }
-                custom_browser = Some(args[i].clone());
+                let path = cursor
+                    .require_value("--browser", inline)
+                    .map_err(|_| "--browser requires a path".to_string())?;
+                custom_browser = Some(path);
             }
             "--browser-arg" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err("--browser-arg requires a flag (e.g. --no-sandbox)".to_string());
-                }
-                browser_args.push(args[i].clone());
+                let flag_val = cursor
+                    .require_value("--browser-arg", inline)
+                    .map_err(|_| "--browser-arg requires a flag (e.g. --no-sandbox)".to_string())?;
+                browser_args.push(flag_val);
             }
             "-s" | "--session" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err("--session requires a session name (e.g. 'my-app')".to_string());
-                }
-                session_name = Some(args[i].clone());
+                let name = cursor
+                    .require_value("--session", inline)
+                    .map_err(|_| "--session requires a session name (e.g. 'my-app')".to_string())?;
+                session_name = Some(name);
             }
             "--user-data-dir" | "--profile" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err("--user-data-dir requires a directory path".to_string());
-                }
-                user_data_dir = Some(PathBuf::from(&args[i]));
+                let path_str = cursor
+                    .require_value("--user-data-dir", inline)
+                    .map_err(|_| "--user-data-dir requires a directory path".to_string())?;
+                user_data_dir = Some(PathBuf::from(path_str));
             }
             "-t" | "--timeout" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err("--timeout requires a duration (e.g. 60s, 500ms)".to_string());
-                }
-                default_timeout_ms = dsl::parse_duration_ms(&args[i])?;
+                let dur_str = cursor
+                    .require_value("--timeout", inline)
+                    .map_err(|_| "--timeout requires a duration (e.g. 60s, 500ms)".to_string())?;
+                default_timeout_ms = dsl::parse_duration_ms(&dur_str)?;
             }
             "--headed" | "--no-headless" => {
                 headless = false;
@@ -115,18 +114,23 @@ pub fn parse_args(args: &[String]) -> Result<Action, String> {
             "-v" | "--verbose" => {
                 verbose = true;
             }
-            "--file" | "-f" if i + 1 < args.len() && !args[i + 1].starts_with('-') => {
-                i += 1;
-                script_file = Some(args[i].clone());
+            "--file" | "-f" => {
+                let path = cursor
+                    .require_value("--file", inline)
+                    .map_err(|_| "--file requires a path".to_string())?;
+                script_file = Some(path);
             }
             "-" | "--repl" | "--stdin" => {
                 read_stdin = true;
             }
-            other => {
-                step_tokens.push(other.to_string());
+            _ => {
+                step_tokens.push(arg);
             }
         }
-        i += 1;
+    }
+
+    if !has_args {
+        return Ok(Action::Help);
     }
 
     let mut steps = Vec::new();

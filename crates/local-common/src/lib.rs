@@ -1,4 +1,4 @@
-//! `local-common` — shared helpers for the `local-tools` workspace.
+//! `local-common` — shared helpers for the `belt` workspace.
 //!
 //! Deliberately dependency-free (standard library only) so every tool that
 //! re-uses it builds and tests with no network access.
@@ -14,10 +14,12 @@
 //! Add new cross-cutting concern as its own module and re-export the small,
 //! stable public surface from here so tool crates keep a single import path.
 
+pub mod cli;
 pub mod paths;
 pub mod process;
 pub mod term;
 
+pub use cli::{split_flag, ArgCursor, CommonFlags};
 pub use paths::{tool_config_dir, tool_data_dir};
 pub use term::{
     color_enabled_for, draw_meter, format_duration, is_terminal, strip_ansi, terminal_columns,
@@ -26,4 +28,4 @@ pub use term::{
 
 /// The shared, human-readable project name. Handy for `--help` strings and
 /// log banners so every tool speaks the same language.
-pub const PROJECT: &str = "local-tools";
+pub const PROJECT: &str = "belt";

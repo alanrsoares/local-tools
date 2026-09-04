@@ -12,6 +12,8 @@ pub enum Action {
     Version,
 }
 
+use local_common::{split_flag, ArgCursor, CommonFlags};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parsed {
     pub action: Action,
@@ -19,8 +21,7 @@ pub struct Parsed {
     pub process_names: Vec<String>,
     pub force: bool,
     pub dry_run: bool,
-    pub color: bool,
-    pub no_color: bool,
+    pub flags: CommonFlags,
 }
 
 impl Default for Parsed {
@@ -31,8 +32,7 @@ impl Default for Parsed {
             process_names: Vec::new(),
             force: false,
             dry_run: false,
-            color: false,
-            no_color: false,
+            flags: CommonFlags::default(),
         }
     }
 }
@@ -60,25 +60,23 @@ OPTIONS
 "#;
 
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> {
-    let mut it = args.into_iter();
+    let mut cursor = ArgCursor::new(args.into_iter());
     let mut p = Parsed::default();
     let mut explicit_list = false;
     let mut explicit_kill = false;
 
-    while let Some(a) = it.next() {
-        match a.as_str() {
+    while let Some(a) = cursor.next() {
+        let (flag, inline) = split_flag(&a);
+        match flag {
             "-h" | "--help" => p.action = Action::Help,
             "-V" | "--version" => p.action = Action::Version,
             "-l" | "--list" => explicit_list = true,
             "-k" | "--kill" => explicit_kill = true,
             "-9" | "--force" => p.force = true,
             "--dry-run" => p.dry_run = true,
-            "--color" => p.color = true,
-            "--no-color" => p.no_color = true,
+            f if p.flags.check_arg(f) => {}
             "-f" | "--find" | "--name" => {
-                let name = it
-                    .next()
-                    .ok_or_else(|| "--find requires a process name".to_string())?;
+                let name = cursor.require_value("--find", inline)?;
                 p.process_names.push(name);
             }
             s if s.starts_with('-') => return Err(format!("unknown flag: {s}")),

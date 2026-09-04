@@ -16,6 +16,8 @@ pub enum Action {
     Version,
 }
 
+use local_common::{split_flag, ArgCursor, CommonFlags};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parsed {
     pub action: Action,
@@ -25,8 +27,7 @@ pub struct Parsed {
     pub targets: Vec<ArtifactType>,
     pub min_size_mb: u64,
     pub older_than_days: Option<u64>,
-    pub color: bool,
-    pub no_color: bool,
+    pub flags: CommonFlags,
 }
 
 impl Default for Parsed {
@@ -39,8 +40,7 @@ impl Default for Parsed {
             targets: Vec::new(),
             min_size_mb: 0,
             older_than_days: None,
-            color: false,
-            no_color: false,
+            flags: CommonFlags::default(),
         }
     }
 }
@@ -70,29 +70,25 @@ OPTIONS
 "#;
 
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> {
-    let mut it = args.into_iter();
+    let mut cursor = ArgCursor::new(args.into_iter());
     let mut p = Parsed::default();
     let mut explicit_clean = false;
 
-    while let Some(a) = it.next() {
-        match a.as_str() {
+    while let Some(a) = cursor.next() {
+        let (flag, inline) = split_flag(&a);
+        match flag {
             "-h" | "--help" => p.action = Action::Help,
             "-V" | "--version" => p.action = Action::Version,
             "-c" | "--clean" => explicit_clean = true,
             "-y" | "--yes" | "--force" => p.force = true,
             "--dry-run" => p.dry_run = true,
-            "--color" => p.color = true,
-            "--no-color" => p.no_color = true,
+            f if p.flags.check_arg(f) => {}
             "-p" | "--path" => {
-                let dir = it
-                    .next()
-                    .ok_or_else(|| "--path requires a directory".to_string())?;
+                let dir = cursor.require_value("--path", inline)?;
                 p.path = PathBuf::from(dir);
             }
             "-t" | "--target" | "--targets" => {
-                let val = it
-                    .next()
-                    .ok_or_else(|| "--target requires a value".to_string())?;
+                let val = cursor.require_value("--target", inline)?;
                 for t_str in val.split(',') {
                     let parsed = ArtifactType::parse(t_str)
                         .ok_or_else(|| format!("unknown ecosystem target: '{t_str}'"))?;
@@ -102,17 +98,13 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
                 }
             }
             "--min-size" => {
-                let val = it
-                    .next()
-                    .ok_or_else(|| "--min-size requires an integer value in MB".to_string())?;
+                let val = cursor.require_value("--min-size", inline)?;
                 p.min_size_mb = val
                     .parse()
                     .map_err(|_| "--min-size must be a valid number".to_string())?;
             }
             "--older-than" => {
-                let val = it
-                    .next()
-                    .ok_or_else(|| "--older-than requires number of days".to_string())?;
+                let val = cursor.require_value("--older-than", inline)?;
                 p.older_than_days = Some(
                     val.parse()
                         .map_err(|_| "--older-than must be a valid number of days".to_string())?,

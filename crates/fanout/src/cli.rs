@@ -81,19 +81,23 @@ impl Default for Options {
     }
 }
 
+use local_common::{split_flag, ArgCursor};
+
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String> {
     let mut opts = Options::default();
-    let mut iter = args.into_iter().peekable();
+    let mut cursor = ArgCursor::new(args.into_iter());
     let mut positional_set = false;
 
-    while let Some(arg) = iter.next() {
+    while let Some(arg) = cursor.next() {
         if arg == "--" {
-            // Trailing passthrough args
-            opts.passthrough_args = iter.collect();
+            // Trailing passthrough args: collect all remaining tokens
+            opts.passthrough_args.extend(cursor);
             break;
         }
 
-        match arg.as_str() {
+        let (flag, inline) = split_flag(&arg);
+
+        match flag {
             "-h" | "--help" => {
                 opts.action = Action::Help;
                 return Ok(opts);
@@ -108,21 +112,15 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String>
             "--color" => opts.color = true,
             "--no-color" => opts.no_color = true,
             "-s" | "--since" => {
-                let val = iter.next().ok_or_else(|| {
-                    "--since requires a git ref value (e.g. main, HEAD~1)".to_string()
-                })?;
+                let val = cursor.require_value("--since", inline)?;
                 opts.since = Some(val);
             }
             "--filter" => {
-                let val = iter
-                    .next()
-                    .ok_or_else(|| "--filter requires a pattern value".to_string())?;
+                let val = cursor.require_value("--filter", inline)?;
                 apply_filter_option(&val, &mut opts);
             }
             "--timeout" => {
-                let val = iter
-                    .next()
-                    .ok_or_else(|| "--timeout requires a millisecond duration value".to_string())?;
+                let val = cursor.require_value("--timeout", inline)?;
                 let ms: u64 = val.parse().map_err(|_| {
                     format!("invalid --timeout value '{val}', expected integer milliseconds")
                 })?;
@@ -131,54 +129,17 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String>
                 }
             }
             "--tail" => {
-                let val = iter
-                    .next()
-                    .ok_or_else(|| "--tail requires an integer line count value".to_string())?;
+                let val = cursor.require_value("--tail", inline)?;
                 let lines: usize = val
                     .parse()
                     .map_err(|_| format!("invalid --tail value '{val}', expected integer"))?;
                 opts.tail_lines = lines;
             }
             "-j" | "--jobs" => {
-                let val = iter
-                    .next()
-                    .ok_or_else(|| "--jobs requires an integer concurrency value".to_string())?;
+                let val = cursor.require_value("--jobs", inline)?;
                 let jobs: usize = val
                     .parse()
                     .map_err(|_| format!("invalid --jobs value '{val}', expected integer >= 1"))?;
-                if jobs >= 1 {
-                    opts.jobs = jobs;
-                }
-            }
-            other if other.starts_with("--since=") => {
-                let val = &other["--since=".len()..];
-                opts.since = Some(val.to_string());
-            }
-            other if other.starts_with("--filter=") => {
-                let val = &other["--filter=".len()..];
-                apply_filter_option(val, &mut opts);
-            }
-            other if other.starts_with("--timeout=") => {
-                let val = &other["--timeout=".len()..];
-                let ms: u64 = val
-                    .parse()
-                    .map_err(|_| format!("invalid --timeout value '{val}'"))?;
-                if ms > 0 {
-                    opts.timeout_ms = ms;
-                }
-            }
-            other if other.starts_with("--tail=") => {
-                let val = &other["--tail=".len()..];
-                let lines: usize = val
-                    .parse()
-                    .map_err(|_| format!("invalid --tail value '{val}'"))?;
-                opts.tail_lines = lines;
-            }
-            other if other.starts_with("--jobs=") => {
-                let val = &other["--jobs=".len()..];
-                let jobs: usize = val
-                    .parse()
-                    .map_err(|_| format!("invalid --jobs value '{val}'"))?;
                 if jobs >= 1 {
                     opts.jobs = jobs;
                 }

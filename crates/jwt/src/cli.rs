@@ -10,6 +10,8 @@ pub enum Action {
     Version,
 }
 
+use local_common::{split_flag, ArgCursor, CommonFlags};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parsed {
     pub action: Action,
@@ -19,8 +21,7 @@ pub struct Parsed {
     pub signature_only: bool,
     pub claims: Vec<String>,
     pub raw_json: bool,
-    pub color: bool,
-    pub no_color: bool,
+    pub flags: CommonFlags,
 }
 
 impl Default for Parsed {
@@ -33,8 +34,7 @@ impl Default for Parsed {
             signature_only: false,
             claims: Vec::new(),
             raw_json: false,
-            color: false,
-            no_color: false,
+            flags: CommonFlags::default(),
         }
     }
 }
@@ -63,23 +63,21 @@ OPTIONS
 "#;
 
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> {
-    let mut it = args.into_iter();
+    let mut cursor = ArgCursor::new(args.into_iter());
     let mut p = Parsed::default();
 
-    while let Some(a) = it.next() {
-        match a.as_str() {
+    while let Some(a) = cursor.next() {
+        let (flag, inline) = split_flag(&a);
+        match flag {
             "-h" | "--help" => p.action = Action::Help,
             "-V" | "--version" => p.action = Action::Version,
             "-p" | "--payload" => p.payload_only = true,
             "-H" | "--header" => p.header_only = true,
             "-s" | "--signature" => p.signature_only = true,
             "-j" | "--json" => p.raw_json = true,
-            "--color" => p.color = true,
-            "--no-color" => p.no_color = true,
+            f if p.flags.check_arg(f) => {}
             "-c" | "--claim" | "--claims" => {
-                let val = it
-                    .next()
-                    .ok_or_else(|| "--claims requires a value".to_string())?;
+                let val = cursor.require_value("--claims", inline)?;
                 for claim in val.split(',') {
                     let trimmed = claim.trim();
                     if !trimmed.is_empty() {

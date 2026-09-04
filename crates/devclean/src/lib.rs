@@ -8,7 +8,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::time::Duration;
 
-use local_common::{color_enabled_for, Colour};
+use local_common::Colour;
 
 pub use artifact::{format_size, Artifact, ArtifactType};
 use cli::{Action, Parsed};
@@ -26,13 +26,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> i32 {
     };
 
     let mut out = io::stdout();
-    let c = Colour::new(if p.color {
-        true
-    } else if p.no_color {
-        false
-    } else {
-        color_enabled_for(&out, false)
-    });
+    let c = p.flags.resolve_colour(&out);
 
     match p.action {
         Action::Help => {

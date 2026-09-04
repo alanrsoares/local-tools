@@ -6,7 +6,7 @@ mod lsof;
 use std::collections::HashSet;
 use std::io::Write;
 
-use local_common::{color_enabled_for, Colour};
+use local_common::Colour;
 
 use cli::{Action, Parsed};
 pub use lsof::{kill_process, parse_lsof_output, query_sockets, ProcessSocket};
@@ -23,13 +23,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> i32 {
     };
 
     let mut out = std::io::stdout();
-    let c = Colour::new(if p.color {
-        true
-    } else if p.no_color {
-        false
-    } else {
-        color_enabled_for(&out, false)
-    });
+    let c = p.flags.resolve_colour(&out);
 
     match p.action {
         Action::Help => {

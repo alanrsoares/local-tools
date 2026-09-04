@@ -68,3 +68,13 @@ install-all:
 # Clean build artifacts
 clean:
     cargo clean
+
+# ------------------------------------------------------------------------------
+# Release
+# ------------------------------------------------------------------------------
+
+# Tag and push a release; CI builds binaries and publishes the GitHub release
+release version:
+    @test -z "$(git status --porcelain)" || (echo "working tree is dirty"; exit 1)
+    git tag "v{{version}}"
+    git push origin "v{{version}}"

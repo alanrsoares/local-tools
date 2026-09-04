@@ -1,6 +1,6 @@
 # belt
 
-Fast, single-purpose Rust binaries that automate **Alan's** day-to-day
+Fast, single-purpose Rust binaries that automate day-to-day
 developer workflows. Primary target is Alan's machine (macOS Apple Silicon);
 the workspace is std-only and builds/tests clean on Linux too, and CI runs
 both.

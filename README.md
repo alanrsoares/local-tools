@@ -9,6 +9,32 @@ The repo is a **Cargo workspace**: a thin, shared `local-common` crate plus one
 crate per tool. Tools are intentionally small, dependency-light, and replace
 ad-hoc shell functions with something versioned, testable, and shareable.
 
+## Install
+
+Prebuilt binaries for macOS (arm64/x64) and Linux (x64/arm64) ship with every
+tagged release:
+
+```sh
+# everything into ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/alanrsoares/local-tools/main/install.sh | sh
+
+# or just the tools you want
+curl -fsSL https://raw.githubusercontent.com/alanrsoares/local-tools/main/install.sh | sh -s -- webdriver jwt
+```
+
+`LOCAL_TOOLS_BIN_DIR` overrides the destination, `LOCAL_TOOLS_VERSION` pins a
+tag, and `GITHUB_TOKEN` lifts the anonymous GitHub API rate limit.
+
+From source instead:
+
+```sh
+cargo install --git https://github.com/alanrsoares/local-tools webdriver
+just install-all   # from a clone
+```
+
+Not published to crates.io — most of the tool names are already taken there.
+
+
 ## Layout
 
 ```

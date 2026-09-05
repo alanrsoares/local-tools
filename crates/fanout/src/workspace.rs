@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cli::Options;
+use crate::config;
 use crate::dag::{PipelineRule, TurboPipeline};
 use crate::json;
 use crate::scm;
@@ -27,7 +28,28 @@ pub struct TaskSpec {
     pub estimated_cost: usize,
 }
 
-const ROOT_GATES: &[&str] = &["lint", "check:skills", "check:server-fns", "themes:a11y"];
+/// Root scripts a `check` runs when the repo ships no `fanout.json`. Only the
+/// ones the root actually declares are run, so this is a superset of several
+/// repos' conventions rather than a contract — a repo that wants an exact list
+/// (or a gate script named something else entirely) declares `targets` in
+/// `fanout.json` instead.
+const DEFAULT_ROOT_GATES: &[&str] = &[
+    "lint",
+    "typecheck",
+    "fmt:check",
+    "format:check",
+    "check:skills",
+    "check:server-fns",
+    "themes:a11y",
+];
+
+/// Root test scripts tried in order for `check:full`, then for `check`.
+const FULL_TEST_SCRIPTS: &[&str] = &["test:all", "test:full", "test"];
+const TEST_SCRIPTS: &[&str] = &["test:unit", "test"];
+
+/// Per-package script a `check` runs. `check` wins where packages define one —
+/// it is the broader gate — and `typecheck` is the fallback.
+const PACKAGE_CHECK_SCRIPTS: &[&str] = &["check", "typecheck"];
 
 /// Simple glob matching supporting `*` wildcards.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
@@ -277,6 +299,77 @@ fn estimate_cost(task_name: &str) -> usize {
     }
 }
 
+/// First script in `candidates` the root declares.
+fn first_declared(candidates: &[&str], root_scripts: &[String]) -> Option<String> {
+    candidates
+        .iter()
+        .find(|c| root_scripts.iter().any(|s| s == *c))
+        .map(|c| (*c).to_string())
+}
+
+/// Root scripts to run for one target: the configured list where the repo ships
+/// a `fanout.json`, the conventional gates otherwise. Either way a script the
+/// root does not declare is dropped rather than run and failed.
+fn root_gates(
+    target: &str,
+    is_check: bool,
+    configured: Option<&config::TargetConfig>,
+    root_scripts: &[String],
+) -> Vec<String> {
+    if let Some(cfg) = configured {
+        return cfg
+            .root
+            .iter()
+            .filter(|gate| root_scripts.iter().any(|s| s == *gate))
+            .cloned()
+            .collect();
+    }
+
+    if !is_check {
+        return first_declared(&[target], root_scripts)
+            .into_iter()
+            .collect();
+    }
+
+    let mut gates: Vec<String> = DEFAULT_ROOT_GATES
+        .iter()
+        .filter(|gate| root_scripts.iter().any(|s| s == *gate))
+        .map(|gate| (*gate).to_string())
+        .collect();
+
+    let test_candidates = if target == "check:full" {
+        FULL_TEST_SCRIPTS
+    } else {
+        TEST_SCRIPTS
+    };
+    gates.extend(first_declared(test_candidates, root_scripts));
+    gates
+}
+
+/// The script run inside each workspace package for one target.
+fn package_script(
+    target: &str,
+    is_check: bool,
+    configured: Option<&config::TargetConfig>,
+    pkgs: &[WorkspacePkg],
+) -> String {
+    if let Some(script) = configured.and_then(|cfg| cfg.package.clone()) {
+        return script;
+    }
+    if !is_check {
+        return target.to_string();
+    }
+
+    PACKAGE_CHECK_SCRIPTS
+        .iter()
+        .find(|script| {
+            pkgs.iter()
+                .any(|pkg| pkg.scripts.iter().any(|s| s == *script))
+        })
+        .unwrap_or(&"typecheck")
+        .to_string()
+}
+
 /// Derive task list from options, workspace structure, and Git affected scope.
 pub fn build_tasks(
     opts: &Options,
@@ -311,74 +404,35 @@ pub fn build_tasks(
         None
     };
 
+    let config = config::read(root_dir)?;
+
     let mut task_specs = Vec::new();
 
     for target in &opts.targets {
         let is_check = target == "check" || target == "check:full";
+        let configured = config.as_ref().and_then(|c| c.target(target));
 
         // 1. Root-level gates (only when no package filter or git since scoping is active)
         if opts.filter.is_none() && opts.since.is_none() {
-            if is_check {
-                for gate in ROOT_GATES {
-                    if root_scripts.iter().any(|s| s == gate) {
-                        let mut args = vec!["run".to_string(), gate.to_string()];
-                        args.extend(opts.passthrough_args.clone());
-                        task_specs.push(TaskSpec {
-                            name: gate.to_string(),
-                            runner_bin: runner_bin.clone(),
-                            args,
-                            cwd: root_dir.to_path_buf(),
-                            color_idx: 0,
-                            estimated_cost: estimate_cost(gate),
-                        });
-                    }
-                }
-
-                let test_target = if target == "check:full" {
-                    "test:all"
-                } else if root_scripts.iter().any(|s| s == "test:unit") {
-                    "test:unit"
-                } else if root_scripts.iter().any(|s| s == "test") {
-                    "test"
-                } else {
-                    ""
-                };
-
-                if !test_target.is_empty() && root_scripts.iter().any(|s| s == test_target) {
-                    let mut args = vec!["run".to_string(), test_target.to_string()];
-                    args.extend(opts.passthrough_args.clone());
-                    task_specs.push(TaskSpec {
-                        name: test_target.to_string(),
-                        runner_bin: runner_bin.clone(),
-                        args,
-                        cwd: root_dir.to_path_buf(),
-                        color_idx: 0,
-                        estimated_cost: estimate_cost(test_target),
-                    });
-                }
-            } else if root_scripts.iter().any(|s| s == target) {
-                let mut args = vec!["run".to_string(), target.clone()];
+            for gate in root_gates(target, is_check, configured, &root_scripts) {
+                let mut args = vec!["run".to_string(), gate.clone()];
                 args.extend(opts.passthrough_args.clone());
                 task_specs.push(TaskSpec {
-                    name: target.clone(),
+                    name: gate.clone(),
                     runner_bin: runner_bin.clone(),
                     args,
                     cwd: root_dir.to_path_buf(),
                     color_idx: 0,
-                    estimated_cost: estimate_cost(target),
+                    estimated_cost: estimate_cost(&gate),
                 });
             }
         }
 
         // 2. Package tasks
-        let script_for_pkgs = if is_check {
-            "typecheck"
-        } else {
-            target.as_str()
-        };
+        let script_for_pkgs = package_script(target, is_check, configured, &pkgs);
 
         for pkg in &pkgs {
-            if !pkg.scripts.iter().any(|s| s == script_for_pkgs) {
+            if !pkg.scripts.contains(&script_for_pkgs) {
                 continue;
             }
 
@@ -519,6 +573,154 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let member = root.join("crates/webdriver");
         assert_eq!(find_workspace_root(&member).unwrap(), root);
+    }
+
+    /// A JavaScript workspace with `root_scripts` at the root and one member
+    /// package declaring `pkg_scripts`, plus an optional `fanout.json`.
+    fn js_workspace(
+        name: &str,
+        root_scripts: &[&str],
+        pkg_scripts: &[&str],
+        config_json: Option<&str>,
+    ) -> PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("packages/app")).unwrap();
+
+        let scripts = |names: &[&str]| {
+            names
+                .iter()
+                .map(|s| format!("\"{s}\": \"true\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        fs::write(
+            dir.join("package.json"),
+            format!(
+                r#"{{ "name": "root", "workspaces": ["packages/*"], "scripts": {{ {} }} }}"#,
+                scripts(root_scripts)
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("packages/app/package.json"),
+            format!(
+                r#"{{ "name": "@w/app", "scripts": {{ {} }} }}"#,
+                scripts(pkg_scripts)
+            ),
+        )
+        .unwrap();
+        if let Some(json) = config_json {
+            fs::write(dir.join(config::CONFIG_FILE), json).unwrap();
+        }
+        dir
+    }
+
+    fn task_names(tasks: &[TaskSpec]) -> Vec<String> {
+        tasks.iter().map(|t| t.name.clone()).collect()
+    }
+
+    #[test]
+    fn check_defaults_cover_every_root_gate_the_repo_declares() {
+        let dir = js_workspace(
+            "fanout-test-ws-defaults",
+            &["lint", "typecheck", "fmt:check", "test", "build"],
+            &["check", "typecheck"],
+            None,
+        );
+
+        let (tasks, _) = build_tasks(&Options::default(), &dir).unwrap();
+
+        // `build` is not a gate; `check` beats `typecheck` inside the package.
+        assert_eq!(
+            task_names(&tasks),
+            vec!["lint", "typecheck", "fmt:check", "test", "@w/app:check"]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn package_check_falls_back_to_typecheck() {
+        let dir = js_workspace("fanout-test-ws-typecheck", &["lint"], &["typecheck"], None);
+
+        let (tasks, _) = build_tasks(&Options::default(), &dir).unwrap();
+
+        assert_eq!(task_names(&tasks), vec!["lint", "@w/app:typecheck"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_full_picks_the_full_test_script_the_repo_has() {
+        let dir = js_workspace(
+            "fanout-test-ws-full",
+            &["lint", "test", "test:full"],
+            &["check"],
+            None,
+        );
+
+        let opts = Options {
+            targets: vec!["check:full".to_string()],
+            ..Options::default()
+        };
+        let (tasks, _) = build_tasks(&opts, &dir).unwrap();
+
+        assert_eq!(
+            task_names(&tasks),
+            vec!["lint", "test:full", "@w/app:check"]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fanout_json_overrides_the_conventional_gates() {
+        let dir = js_workspace(
+            "fanout-test-ws-config",
+            &["lint", "typecheck", "test", "test:full", "seed:check"],
+            &["check", "typecheck"],
+            Some(
+                r#"{
+                    "targets": {
+                        "check:full": {
+                            "root": ["lint", "test:full", "seed:check", "absent:script"],
+                            "package": "typecheck"
+                        }
+                    }
+                }"#,
+            ),
+        );
+
+        let opts = Options {
+            targets: vec!["check:full".to_string()],
+            ..Options::default()
+        };
+        let (tasks, _) = build_tasks(&opts, &dir).unwrap();
+
+        // Configured order is kept, `typecheck` is not silently added back, and a
+        // script the root does not declare is dropped rather than run and failed.
+        assert_eq!(
+            task_names(&tasks),
+            vec!["lint", "test:full", "seed:check", "@w/app:typecheck"]
+        );
+
+        // An unconfigured target still follows the conventions.
+        let (check_tasks, _) = build_tasks(&Options::default(), &dir).unwrap();
+        assert_eq!(
+            task_names(&check_tasks),
+            vec!["lint", "typecheck", "test", "@w/app:check"]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn malformed_fanout_json_fails_the_run() {
+        let dir = js_workspace(
+            "fanout-test-ws-bad-config",
+            &["lint"],
+            &["check"],
+            Some("{"),
+        );
+        assert!(build_tasks(&Options::default(), &dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 

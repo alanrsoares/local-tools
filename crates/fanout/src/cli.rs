@@ -17,6 +17,7 @@ TARGETS:
 FLAGS:
     --bail             Abort remaining tasks on first failure
     --compact          Machine-readable mode: no cursor jumps, output only on failure
+    --dry-run          Print the resolved task list and exit without running it
     --topological      Enforce topological package dependency order (^build)
     --color            Force ANSI color output
     --no-color         Disable ANSI color output
@@ -50,6 +51,7 @@ pub struct Options {
     pub bail: bool,
     pub timeout_ms: u64,
     pub compact: bool,
+    pub dry_run: bool,
     pub tail_lines: usize,
     pub jobs: usize,
     pub color: bool,
@@ -73,6 +75,7 @@ impl Default for Options {
             bail: false,
             timeout_ms: 15 * 60 * 1000,
             compact: false,
+            dry_run: false,
             tail_lines: 40,
             jobs: default_jobs,
             color: false,
@@ -108,6 +111,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String>
             }
             "--bail" => opts.bail = true,
             "--compact" => opts.compact = true,
+            "--dry-run" | "--list" => opts.dry_run = true,
             "--topological" | "--deps" => opts.topological = true,
             "--color" => opts.color = true,
             "--no-color" => opts.no_color = true,
@@ -219,6 +223,13 @@ mod tests {
         assert_eq!(opts.since.as_deref(), Some("main"));
         assert_eq!(opts.timeout_ms, 60_000);
         assert_eq!(opts.passthrough_args, vec!["--coverage", "-u"]);
+    }
+
+    #[test]
+    fn parses_dry_run() {
+        assert!(parse(vec!["--dry-run".to_string()]).unwrap().dry_run);
+        assert!(parse(vec!["--list".to_string()]).unwrap().dry_run);
+        assert!(!parse(vec![]).unwrap().dry_run);
     }
 
     #[test]

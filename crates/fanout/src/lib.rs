@@ -1,6 +1,7 @@
 //! `fanout` — concurrent quality gate & task matrix runner (inspired by Turborepo).
 
 pub mod cli;
+pub mod config;
 pub mod dag;
 pub mod json;
 pub mod runner;
@@ -56,6 +57,21 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> i32 {
                     return 1;
                 }
             };
+
+            if opts.dry_run {
+                for task in &tasks {
+                    let where_ = task.cwd.strip_prefix(&root_dir).unwrap_or(&task.cwd);
+                    let cwd = where_.to_string_lossy();
+                    let cwd = if cwd.is_empty() { "." } else { &cwd };
+                    println!(
+                        "{}\t{} {}\t({cwd})",
+                        task.name,
+                        task.runner_bin,
+                        task.args.join(" ")
+                    );
+                }
+                return 0;
+            }
 
             let pipeline = workspace::read_turbo_pipeline(&root_dir);
 

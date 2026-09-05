@@ -52,8 +52,35 @@ belt/
 | **`portkill`** | Sub-millisecond port inspector and process killer | `portkill`<br>`portkill 3000 8080`<br>`portkill -f node` |
 | **`jwt`** | Zero-dependency JWT inspector, claim extractor & claim humanizer | `jwt <TOKEN>`<br>`pbpaste \| jwt`<br>`jwt -c exp,sub <TOKEN>` |
 | **`devclean`** | Multi-ecosystem build artifact scanner & disk space reclaimer | `devclean`<br>`devclean ~/dev --clean`<br>`devclean -t rust,node` |
-| **`fanout`** | Concurrent quality gate & task matrix runner with topological DAG, Git change detection & live TUI | `fanout`<br>`fanout lint typecheck test --bail`<br>`fanout --since main`<br>`fanout --filter '@renkonos/*' --topological` |
+| **`fanout`** | Concurrent quality gate & task matrix runner with topological DAG, Git change detection & live TUI | `fanout`<br>`fanout lint typecheck test --bail`<br>`fanout --since main`<br>`fanout check:full --dry-run`<br>`fanout --filter '@renkonos/*' --topological` |
 | **`webdriver`** | Zero-dependency browser automation, persistent sessions & screenshot engine. Terse one-line-per-step output (`ok` / `warn` / `err`), `text=` and `role=` locators, buffered console errors, streaming `--repl` | `webdriver --session my-app http://localhost:3000 wait-for-hydration click 'role=button:Save' console`<br>`webdriver https://app.dev viewport 1440 900 screenshot out.png --full-page`<br>`webdriver --repl < script.wd`<br>`webdriver --list-sessions` |
+
+### Configuring `fanout`
+
+`fanout check` resolves its task list by convention: every root `package.json`
+script named `lint`, `typecheck`, `fmt:check`, `format:check`, `check:skills`,
+`check:server-fns` or `themes:a11y`, then the first test script it finds
+(`test:unit`, `test` — or `test:all`, `test:full`, `test` for `check:full`), then
+one task per workspace package that declares `check`, falling back to
+`typecheck`. Scripts a repo does not declare are skipped, never run and failed.
+
+A repo whose gate is a specific list says so in `fanout.json` at the workspace
+root:
+
+```json
+{
+  "targets": {
+    "check:full": {
+      "root": ["lint", "typecheck", "test:full", "seed:check", "bootstrap:conformance"],
+      "package": "check"
+    }
+  }
+}
+```
+
+`root` runs in the order given; `package` names the per-package script. A target
+with no entry keeps the conventions. `fanout <target> --dry-run` prints the
+resolved list without running it — the quickest way to confirm a config.
 
 ## Conventions
 
